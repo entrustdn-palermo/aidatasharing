@@ -378,6 +378,10 @@ async def create_connector(
             detail="Connector with this name already exists"
         )
     
+    # Encrypt credentials before storing
+    from app.core.encryption import encrypt_dict
+    encrypted_credentials = encrypt_dict(connector_data.credentials) if connector_data.credentials else None
+
     # Create connector
     db_connector = DatabaseConnector(
         name=connector_data.name,
@@ -385,7 +389,7 @@ async def create_connector(
         description=connector_data.description,
         organization_id=current_user.organization_id,
         connection_config=connector_data.connection_config,
-        credentials=connector_data.credentials,  # TODO: Encrypt in production
+        credentials=encrypted_credentials,  # ✅ Now encrypted
         created_by=current_user.id,
         mindsdb_database_name=f"org_{current_user.organization_id}_{connector_data.name.lower().replace(' ', '_')}"
     )
@@ -469,6 +473,10 @@ async def create_simplified_connector(
             detail="Connector with this name already exists"
         )
     
+    # Encrypt credentials before storing
+    from app.core.encryption import encrypt_dict
+    encrypted_credentials = encrypt_dict(credentials) if credentials else None
+
     # Create connector using parsed configuration
     db_connector = DatabaseConnector(
         name=connector_data.name,
@@ -476,7 +484,7 @@ async def create_simplified_connector(
         description=connector_data.description,
         organization_id=current_user.organization_id,
         connection_config=connection_config,
-        credentials=credentials,  # TODO: Encrypt in production
+        credentials=encrypted_credentials,  # ✅ Now encrypted
         created_by=current_user.id,
         mindsdb_database_name=f"org_{current_user.organization_id}_{connector_data.name.lower().replace(' ', '_')}"
     )
