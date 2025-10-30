@@ -2241,6 +2241,715 @@ Please provide a comprehensive answer about this dataset:"""
             logger.error(f"Error loading dataset for visualization: {e}")
             return None
 
+    # ============================================================
+    # AGENT-BASED ARCHITECTURE METHODS (New)
+    # ============================================================
+
+    def get_model_config(self, dataset=None) -> Dict[str, Any]:
+        """
+        Get model configuration with optional dataset-specific overrides.
+        Supports hybrid approach: global defaults with per-dataset customization.
+        """
+        try:
+            # Default provider configuration
+            default_provider = getattr(settings, 'DEFAULT_LLM_PROVIDER', 'google')
+
+            # Check if dataset has custom model preference
+            if dataset and hasattr(dataset, 'chat_model_name') and dataset.chat_model_name:
+                provider = dataset.chat_model_provider or default_provider
+                return {
+                    'provider': provider,
+                    'model_name': dataset.chat_model_name,
+                    'api_key': self.api_key
+                }
+
+            # Use default configuration
+            return {
+                'provider': default_provider,
+                'model_name': self.default_model,
+                'api_key': self.api_key
+            }
+        except Exception as e:
+            logger.error(f"Error getting model config: {e}")
+            return {
+                'provider': 'google',
+                'model_name': self.default_model,
+                'api_key': self.api_key
+            }
+
+    def create_or_get_agent(self, agent_name: str, tables: List[str], prompt_template: str,
+                           model_config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Create or retrieve an agent for a specific dataset.
+        Agents are persistent and reusable across chat sessions.
+
+        Args:
+            agent_name: Unique name for the agent
+            tables: List of table references (e.g., ['file_db_1.data', 'file_db_2.data'])
+            prompt_template: System prompt for the agent
+            model_config: Optional model configuration (provider, model_name, api_key)
+
+        Returns:
+            Dict with success status, agent reference, and agent_name
+        """
+        if not self._ensure_connection():
+            return {
+                "success": False,
+                "error": "Failed to connect to MindsDB"
+            }
+
+        try:
+            # Try to get existing agent
+            try:
+                agent = self.connection.agents.get(agent_name)
+                logger.info(f"✅ Retrieved existing agent: {agent_name}")
+                return {
+                    "success": True,
+                    "agent": agent,
+                    "agent_name": agent_name,
+                    "status": "existing"
+                }
+            except Exception as e:
+                logger.info(f"Agent {agent_name} not found, creating new one...")
+
+            # Create new agent
+            model_cfg = model_config or self.get_model_config()
+
+            logger.info(f"🤖 Creating agent '{agent_name}' with {len(tables)} tables")
+            logger.debug(f"Agent tables: {tables}")
+            logger.debug(f"Model config: {model_cfg.get('provider')} - {model_cfg.get('model_name')}")
+
+            agent = self.connection.agents.create(
+                name=agent_name,
+                model=model_cfg,
+                data={'tables': tables},
+                prompt_template=prompt_template
+            )
+
+            logger.info(f"✅ Created new agent: {agent_name}")
+            return {
+                "success": True,
+                "agent": agent,
+                "agent_name": agent_name,
+                "status": "created"
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Failed to create/get agent {agent_name}: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    def update_agent(self, agent_name: str, new_tables: List[str] = None,
+                    new_prompt: str = None, new_model_config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Update agent's data sources, prompt, or model configuration.
+        Used when dataset changes (files added/removed).
+
+        Args:
+            agent_name: Name of the agent to update
+            new_tables: Optional new list of tables
+            new_prompt: Optional new prompt template
+            new_model_config: Optional new model configuration
+
+        Returns:
+            Dict with success status and message
+        """
+        try:
+            # For now, we'll delete and recreate the agent
+            # MindsDB SDK may not support direct agent updates yet
+            self.delete_agent(agent_name)
+            logger.info(f"🔄 Agent {agent_name} deleted for recreation")
+
+            return {
+                "success": True,
+                "message": f"Agent {agent_name} marked for recreation",
+                "action": "recreate"
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Failed to update agent {agent_name}: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    def delete_agent(self, agent_name: str) -> bool:
+        """
+        Delete agent when dataset is deleted or needs recreation.
+
+        Args:
+            agent_name: Name of the agent to delete
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Delete via REST API (SDK may not have delete method)
+            response = requests.delete(
+                f"{self.base_url}/api/projects/mindsdb/agents/{agent_name}"
+            )
+
+            if response.status_code in [200, 204, 404]:
+                logger.info(f"✅ Deleted agent: {agent_name}")
+                return True
+            else:
+                logger.warning(f"⚠️ Failed to delete agent {agent_name}: {response.status_code}")
+                return False
+
+        except Exception as e:
+            logger.error(f"❌ Failed to delete agent {agent_name}: {e}")
+            return False
+
+    def list_agents(self) -> List[str]:
+        """
+        List all available agents in MindsDB.
+        Useful for debugging and monitoring.
+
+        Returns:
+            List of agent names
+        """
+        if not self._ensure_connection():
+            return []
+
+        try:
+            # Try to list agents via SDK
+            agents = self.connection.agents.list()
+            agent_names = [agent.name for agent in agents]
+            logger.info(f"📋 Found {len(agent_names)} agents")
+            return agent_names
+        except Exception as e:
+            logger.error(f"❌ Failed to list agents: {e}")
+            return []
+
+    def setup_single_file_agent(self, dataset, db) -> Dict[str, Any]:
+        """
+        Create an agent for a single-file dataset.
+        This replaces the old model-based approach with persistent agents.
+
+        Args:
+            dataset: Dataset model instance
+            db: Database session
+
+        Returns:
+            Dict with success status, agent_name, and table info
+        """
+        try:
+            logger.info(f"🔧 Setting up single-file agent for dataset: {dataset.name} (ID: {dataset.id})")
+
+            # Generate agent name
+            agent_name = f"dataset_{dataset.id}_agent"
+
+            # Check if agent already exists and is current
+            if dataset.agent_name == agent_name and dataset.agent_created_at:
+                logger.info(f"♻️  Agent already exists: {agent_name}")
+                # Verify it exists in MindsDB
+                try:
+                    agent = self.connection.agents.get(agent_name)
+                    return {
+                        "success": True,
+                        "agent_name": agent_name,
+                        "status": "existing",
+                        "agent": agent
+                    }
+                except:
+                    logger.info(f"Agent {agent_name} not found in MindsDB, will recreate")
+
+            # Get file upload record
+            from app.models.file_handler import FileUpload
+            file_upload = db.query(FileUpload).filter(
+                FileUpload.dataset_id == dataset.id
+            ).first()
+
+            if not file_upload:
+                return {
+                    "success": False,
+                    "error": "No file upload found for dataset"
+                }
+
+            # Ensure file has MindsDB database connector
+            connector_result = self.create_file_database_connector(file_upload)
+            if not connector_result.get("success"):
+                return {
+                    "success": False,
+                    "error": f"Failed to create database connector: {connector_result.get('error')}"
+                }
+
+            database_name = connector_result["database_name"]
+            table_name = connector_result.get("test_result", {}).get("table_name", "data")
+            full_table_ref = f"{database_name}.{table_name}"
+
+            logger.info(f"📊 Using table: {full_table_ref}")
+
+            # Build comprehensive prompt template
+            prompt_template = self._build_single_file_prompt(dataset, file_upload, database_name, table_name)
+
+            # Get model configuration
+            model_config = self.get_model_config(dataset)
+
+            # Create or get agent
+            agent_result = self.create_or_get_agent(
+                agent_name=agent_name,
+                tables=[full_table_ref],
+                prompt_template=prompt_template,
+                model_config=model_config
+            )
+
+            if not agent_result.get("success"):
+                return agent_result
+
+            # Update dataset with agent info
+            dataset.agent_name = agent_name
+            dataset.agent_created_at = datetime.utcnow()
+            dataset.agent_last_updated = datetime.utcnow()
+            db.commit()
+
+            logger.info(f"✅ Single-file agent setup complete: {agent_name}")
+
+            return {
+                "success": True,
+                "agent_name": agent_name,
+                "table": full_table_ref,
+                "status": agent_result.get("status", "created"),
+                "agent": agent_result.get("agent")
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Failed to setup single-file agent: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    def _build_single_file_prompt(self, dataset, file_upload, database_name: str, table_name: str) -> str:
+        """Build prompt template for single-file dataset agent."""
+
+        # Handle dataset type properly
+        dataset_type = dataset.type.value if hasattr(dataset.type, 'value') else str(dataset.type)
+
+        prompt = f"""You are an AI assistant analyzing a dataset named "{dataset.name}".
+
+Dataset Information:
+- Name: {dataset.name}
+- Type: {dataset_type}
+- Description: {dataset.description or 'No description provided'}
+- File: {file_upload.original_filename if file_upload else 'Unknown'}
+- Rows: {dataset.row_count or 'Unknown'}
+- Columns: {dataset.column_count or 'Unknown'}
+
+Data Access:
+- Database: {database_name}
+- Table: {table_name}
+- Full Reference: {database_name}.{table_name}
+
+"""
+
+        # Add schema information if available
+        if dataset.schema_info and "columns" in dataset.schema_info:
+            prompt += "Schema:\n"
+            for col in dataset.schema_info["columns"][:20]:  # Limit to first 20 columns
+                col_name = col.get('name', 'Unknown')
+                col_type = col.get('type', 'Unknown')
+                prompt += f"  - {col_name}: {col_type}\n"
+            if len(dataset.schema_info["columns"]) > 20:
+                prompt += f"  ... and {len(dataset.schema_info['columns']) - 20} more columns\n"
+            prompt += "\n"
+
+        # Add AI summary if available
+        if dataset.ai_summary:
+            prompt += f"Dataset Summary:\n{dataset.ai_summary}\n\n"
+
+        prompt += f"""Your Capabilities:
+1. Query the dataset using SQL: SELECT * FROM {database_name}.{table_name}
+2. Answer questions about the data with specific examples
+3. Perform statistical analysis and aggregations
+4. Identify patterns and insights in the data
+5. Suggest data-driven recommendations
+
+Instructions:
+- Always provide data-driven answers with specific numbers and examples
+- When asked about data, query the table to get actual values
+- Be concise but accurate in your responses
+- If you need to perform calculations, use SQL queries
+- Reference specific rows and columns when explaining insights
+
+Please provide helpful, accurate, and data-driven responses based on the actual dataset content."""
+
+        return prompt
+
+    def setup_multi_file_agent(self, dataset, db) -> Dict[str, Any]:
+        """
+        Create an agent that can query ALL files in a multi-file dataset.
+        This is the GAME CHANGER - enables cross-file analysis!
+
+        Args:
+            dataset: Dataset model instance (must be multi-file)
+            db: Database session
+
+        Returns:
+            Dict with success status, agent_name, tables list, and file count
+        """
+        try:
+            logger.info(f"🔧 Setting up MULTI-FILE agent for dataset: {dataset.name} (ID: {dataset.id})")
+
+            if not dataset.is_multi_file_dataset:
+                return {
+                    "success": False,
+                    "error": "Dataset is not a multi-file dataset"
+                }
+
+            # Generate agent name
+            agent_name = f"dataset_{dataset.id}_multi_agent"
+
+            # Check if agent already exists and is current
+            if dataset.agent_name == agent_name and dataset.agent_created_at:
+                logger.info(f"♻️  Multi-file agent already exists: {agent_name}")
+                try:
+                    agent = self.connection.agents.get(agent_name)
+                    return {
+                        "success": True,
+                        "agent_name": agent_name,
+                        "status": "existing",
+                        "agent": agent
+                    }
+                except:
+                    logger.info(f"Agent {agent_name} not found in MindsDB, will recreate")
+
+            # Get ALL files in the dataset
+            from app.models.dataset import DatasetFile
+            dataset_files = db.query(DatasetFile).filter(
+                DatasetFile.dataset_id == dataset.id,
+                DatasetFile.is_deleted == False
+            ).all()
+
+            if not dataset_files:
+                return {
+                    "success": False,
+                    "error": "No files found in multi-file dataset"
+                }
+
+            logger.info(f"📁 Found {len(dataset_files)} files to include in agent")
+
+            # Create database connector for EACH file and collect table references
+            all_tables = []
+            file_descriptions = []
+            from app.models.file_handler import FileUpload
+
+            for idx, dataset_file in enumerate(dataset_files, 1):
+                logger.info(f"  Processing file {idx}/{len(dataset_files)}: {dataset_file.filename}")
+
+                # Find corresponding file upload
+                file_upload = db.query(FileUpload).filter(
+                    FileUpload.dataset_id == dataset.id,
+                    FileUpload.original_filename == dataset_file.filename
+                ).first()
+
+                if not file_upload:
+                    logger.warning(f"  ⚠️  No upload record found for {dataset_file.filename}, skipping")
+                    continue
+
+                # Create database connector for this file
+                connector_result = self.create_file_database_connector(file_upload)
+
+                if connector_result.get("success"):
+                    database_name = connector_result["database_name"]
+                    table_name = connector_result.get("test_result", {}).get("table_name", "data")
+                    full_table_ref = f"{database_name}.{table_name}"
+
+                    all_tables.append(full_table_ref)
+
+                    # Create descriptive entry for prompt
+                    file_type = dataset_file.file_type or "Unknown"
+                    is_primary = "PRIMARY" if dataset_file.is_primary else "Supporting"
+                    file_descriptions.append(
+                        f"  - {full_table_ref}: {dataset_file.filename} ({file_type}, {is_primary})"
+                    )
+
+                    logger.info(f"    ✅ Added table: {full_table_ref}")
+                else:
+                    logger.warning(f"  ⚠️  Failed to create connector for {dataset_file.filename}")
+
+            if not all_tables:
+                return {
+                    "success": False,
+                    "error": "Failed to create database connectors for any files"
+                }
+
+            logger.info(f"📊 Agent will have access to {len(all_tables)} tables")
+
+            # Build comprehensive multi-file prompt template
+            prompt_template = self._build_multi_file_prompt(
+                dataset, dataset_files, file_descriptions, all_tables
+            )
+
+            # Get model configuration
+            model_config = self.get_model_config(dataset)
+
+            # Create or get agent with ALL tables
+            agent_result = self.create_or_get_agent(
+                agent_name=agent_name,
+                tables=all_tables,  # ← ALL FILES!
+                prompt_template=prompt_template,
+                model_config=model_config
+            )
+
+            if not agent_result.get("success"):
+                return agent_result
+
+            # Update dataset with agent info
+            dataset.agent_name = agent_name
+            dataset.agent_created_at = datetime.utcnow()
+            dataset.agent_last_updated = datetime.utcnow()
+            db.commit()
+
+            logger.info(f"✅ Multi-file agent setup complete: {agent_name} with {len(all_tables)} tables")
+
+            return {
+                "success": True,
+                "agent_name": agent_name,
+                "tables": all_tables,
+                "tables_count": len(all_tables),
+                "files_count": len(dataset_files),
+                "status": agent_result.get("status", "created"),
+                "agent": agent_result.get("agent")
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Failed to setup multi-file agent: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    def _build_multi_file_prompt(self, dataset, dataset_files, file_descriptions: List[str],
+                                 all_tables: List[str]) -> str:
+        """Build prompt template for multi-file dataset agent."""
+
+        dataset_type = dataset.type.value if hasattr(dataset.type, 'value') else str(dataset.type)
+
+        prompt = f"""You are an AI assistant analyzing a MULTI-FILE dataset named "{dataset.name}".
+
+🎯 KEY CAPABILITY: You have access to ALL {len(dataset_files)} files in this dataset and can perform CROSS-FILE ANALYSIS!
+
+Dataset Information:
+- Name: {dataset.name}
+- Type: Multi-file {dataset_type} dataset
+- Description: {dataset.description or 'No description provided'}
+- Total Files: {len(dataset_files)}
+- Total Tables: {len(all_tables)}
+
+Available Data Sources:
+{chr(10).join(file_descriptions)}
+
+"""
+
+        # Add schema information for primary file if available
+        if dataset.schema_info and "columns" in dataset.schema_info:
+            primary_file = next((f for f in dataset_files if f.is_primary), dataset_files[0] if dataset_files else None)
+            if primary_file:
+                prompt += f"\nPrimary File Schema ({primary_file.filename}):\n"
+                for col in dataset.schema_info["columns"][:15]:
+                    col_name = col.get('name', 'Unknown')
+                    col_type = col.get('type', 'Unknown')
+                    prompt += f"  - {col_name}: {col_type}\n"
+                if len(dataset.schema_info["columns"]) > 15:
+                    prompt += f"  ... and {len(dataset.schema_info['columns']) - 15} more columns\n"
+                prompt += "\n"
+
+        # Add AI summary if available
+        if dataset.ai_summary:
+            prompt += f"Dataset Summary:\n{dataset.ai_summary}\n\n"
+
+        prompt += f"""Your Powerful Capabilities:
+1. ✅ Query ANY file in the dataset using its table reference
+2. ✅ Perform CROSS-FILE JOINS and analysis
+3. ✅ Correlate data across multiple files
+4. ✅ Aggregate statistics from all files
+5. ✅ Discover relationships between different data sources
+6. ✅ Answer questions that require multiple files
+
+Example Cross-File Queries:
+- "How does rainfall (weather_data) affect crop yield (harvest_data)?"
+- "Correlation between soil quality (soil_analysis) and production (crop_yield)?"
+- "Join fertilizer usage (fertilizer_log) with harvest results (harvest_data)"
+- "Compare trends across all yearly data files"
+
+Instructions:
+- When answering questions, consider which files/tables contain relevant data
+- Use JOINs when answering questions that span multiple files
+- Always provide specific data examples with actual numbers
+- Explain which files you're using for your analysis
+- Be explicit about cross-file correlations and relationships
+- If a question requires data from multiple files, say so and use all relevant tables
+
+Available Tables for Queries:
+{chr(10).join([f'  - {table}' for table in all_tables])}
+
+This is a multi-file dataset - USE ALL AVAILABLE FILES to provide comprehensive insights!"""
+
+        return prompt
+
+    def chat_with_dataset_agent(self, dataset_id: int, message: str, db,
+                                session_id: str = None, stream: bool = True) -> Dict[str, Any]:
+        """
+        Chat with dataset using agent-based architecture.
+        This is the main entry point replacing the old model-based chat.
+
+        Features:
+        - Persistent agents (no recreation overhead)
+        - Multi-file support (cross-file analysis)
+        - Streaming responses
+        - Automatic fallback to direct API
+
+        Args:
+            dataset_id: Dataset ID
+            message: User's question/message
+            db: Database session
+            session_id: Optional session ID for conversation history
+            stream: Whether to stream response (default True)
+
+        Returns:
+            Dict with answer, metadata, and performance info
+        """
+        start_time = time.time()
+
+        try:
+            # Get dataset
+            from app.models.dataset import Dataset
+            dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+
+            if not dataset:
+                return {
+                    "success": False,
+                    "error": "Dataset not found"
+                }
+
+            logger.info(f"💬 Agent-based chat request for dataset: {dataset.name} (ID: {dataset_id})")
+
+            # Setup appropriate agent based on dataset type
+            if dataset.is_multi_file_dataset:
+                agent_result = self.setup_multi_file_agent(dataset, db)
+            else:
+                agent_result = self.setup_single_file_agent(dataset, db)
+
+            if not agent_result.get("success"):
+                logger.warning(f"Agent setup failed: {agent_result.get('error')}, using fallback")
+                return self._fallback_gemini_chat(message, dataset)
+
+            agent_name = agent_result["agent_name"]
+
+            # Get agent from MindsDB
+            if not self._ensure_connection():
+                logger.warning("Connection failed, using fallback")
+                return self._fallback_gemini_chat(message, dataset)
+
+            agent = self.connection.agents.get(agent_name)
+
+            # Prepare conversation format for agent
+            conversation = [{
+                'question': message,
+                'answer': None
+            }]
+
+            logger.info(f"🤖 Querying agent: {agent_name}")
+
+            # Stream response from agent
+            if stream:
+                try:
+                    completion = agent.completion_stream(conversation)
+                    full_response = ""
+
+                    for chunk in completion:
+                        full_response += chunk
+
+                    response_time = time.time() - start_time
+
+                    logger.info(f"✅ Agent response complete in {response_time:.2f}s")
+
+                    return {
+                        "success": True,
+                        "answer": full_response,
+                        "source": "agent",
+                        "agent_name": agent_name,
+                        "dataset_type": "multi_file" if dataset.is_multi_file_dataset else "single_file",
+                        "tables_count": agent_result.get("tables_count", 1),
+                        "response_time": response_time,
+                        "streaming": True,
+                        "model": self.get_model_config(dataset).get("model_name")
+                    }
+
+                except Exception as e:
+                    logger.error(f"Streaming failed: {e}, trying non-streaming")
+                    # Fall through to non-streaming
+
+            # Non-streaming fallback
+            try:
+                completion = agent.completion(conversation)
+                answer = completion.get('answer', '') if isinstance(completion, dict) else str(completion)
+
+                response_time = time.time() - start_time
+
+                return {
+                    "success": True,
+                    "answer": answer,
+                    "source": "agent",
+                    "agent_name": agent_name,
+                    "dataset_type": "multi_file" if dataset.is_multi_file_dataset else "single_file",
+                    "response_time": response_time,
+                    "streaming": False
+                }
+
+            except Exception as e:
+                logger.error(f"Agent query failed: {e}")
+                return self._fallback_gemini_chat(message, dataset)
+
+        except Exception as e:
+            logger.error(f"❌ Chat with agent failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+            # Fallback to direct Gemini API
+            return self._fallback_gemini_chat(message, dataset)
+
+    def _fallback_gemini_chat(self, message: str, dataset) -> Dict[str, Any]:
+        """
+        Fallback to direct Gemini API if agent-based approach fails.
+        Maintains compatibility while agent system is being deployed.
+        """
+        try:
+            logger.info("🔄 Using fallback Gemini API")
+
+            # Build context from dataset
+            context = f"""Dataset: {dataset.name}
+Description: {dataset.description or 'No description'}
+Type: {dataset.type.value if hasattr(dataset.type, 'value') else str(dataset.type)}
+
+User Question: {message}
+
+Please provide a helpful response based on the dataset information available."""
+
+            # Use direct Gemini API
+            model = genai.GenerativeModel(self.default_model)
+            response = model.generate_content(context)
+
+            return {
+                "success": True,
+                "answer": response.text,
+                "source": "fallback_gemini",
+                "streaming": False,
+                "model": self.default_model
+            }
+
+        except Exception as e:
+            logger.error(f"Fallback also failed: {e}")
+            return {
+                "success": False,
+                "error": f"Unable to process request: {str(e)}"
+            }
+
 
 # Create service instance
 mindsdb_service = MindsDBService()

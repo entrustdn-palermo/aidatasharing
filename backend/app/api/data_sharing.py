@@ -654,16 +654,29 @@ async def chat_with_shared_dataset(
                 db.commit()
                 session = None
     
-    # Use MindsDB service for chat
+    # Use MindsDB service for chat (agent-based or legacy)
     mindsdb_service = MindsDBService()
     try:
-        chat_response = mindsdb_service.chat_with_dataset(
-            dataset_id=str(dataset.id),
-            message=chat_request.message,
-            user_id=None,  # Anonymous user
-            session_id=chat_request.session_token,
-            organization_id=dataset.organization_id
-        )
+        # Check if agent-based chat is enabled
+        from app.core.config import settings
+        if getattr(settings, 'USE_AGENT_BASED_CHAT', True):
+            # Use new agent-based architecture
+            chat_response = mindsdb_service.chat_with_dataset_agent(
+                dataset_id=dataset.id,
+                message=chat_request.message,
+                db=db,
+                session_id=chat_request.session_token,
+                stream=True
+            )
+        else:
+            # Fallback to legacy model-based chat
+            chat_response = mindsdb_service.chat_with_dataset(
+                dataset_id=str(dataset.id),
+                message=chat_request.message,
+                user_id=None,  # Anonymous user
+                session_id=chat_request.session_token,
+                organization_id=dataset.organization_id
+            )
         
         # Update session activity
         if session:

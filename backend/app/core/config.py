@@ -46,15 +46,22 @@ class Settings(BaseSettings):
         return self._app_config.services.get_cors_origins()
     
     # JWT
-    @property 
+    @property
     def ACCESS_TOKEN_EXPIRE_MINUTES(self) -> int:
         """Get JWT expiry from centralized config"""
         return self._app_config.security.JWT_ACCESS_TOKEN_EXPIRE_MINUTES
-    
+
     @property
     def ALGORITHM(self) -> str:
         """Get JWT algorithm from centralized config"""
         return self._app_config.security.JWT_ALGORITHM
+
+    # Encryption Configuration
+    ENCRYPTION_KEY: Optional[str] = Field(
+        default=None,
+        env="ENCRYPTION_KEY",
+        description="Encryption key for sensitive data (credentials, API keys). Generate with: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
+    )
     
     # Google API Configuration - Now from environment
     @property
@@ -74,10 +81,23 @@ class Settings(BaseSettings):
     
     # AI Model Configuration - From environment
     DEFAULT_GEMINI_MODEL: str = "gemini-2.0-flash"
+    DEFAULT_LLM_PROVIDER: str = "google"  # google, openai, anthropic, azure_openai
     GEMINI_ENGINE_NAME: str = "google_gemini_engine"
     GEMINI_CHAT_MODEL_NAME: str = "gemini_chat_assistant"
     GEMINI_VISION_MODEL_NAME: str = "gemini_vision_assistant"
     GEMINI_EMBEDDING_MODEL_NAME: str = "gemini_embedding_assistant"
+
+    # Feature Flags for Agent-Based Architecture
+    USE_AGENT_BASED_CHAT: bool = Field(
+        default=True,
+        env="USE_AGENT_BASED_CHAT",
+        description="Enable agent-based chat architecture (recommended). Set to false for legacy model-based approach."
+    )
+    AGENT_CHAT_ENABLE_FALLBACK: bool = Field(
+        default=True,
+        env="AGENT_CHAT_ENABLE_FALLBACK",
+        description="Enable fallback to direct Gemini API if agent-based chat fails"
+    )
     
     # Data Sharing Configuration
     ENABLE_DATA_SHARING: bool = True

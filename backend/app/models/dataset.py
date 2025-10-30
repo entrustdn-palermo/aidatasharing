@@ -99,6 +99,13 @@ class Dataset(Base):
     ai_chat_enabled = Column(Boolean, default=True)
     chat_model_name = Column(String, nullable=True)  # Gemini model used for chat
     chat_context = Column(JSON, nullable=True)  # Context for AI chat
+
+    # Agent-based AI Configuration (New architecture)
+    agent_name = Column(String, nullable=True)  # MindsDB agent name for this dataset
+    agent_created_at = Column(DateTime, nullable=True)  # When the agent was created
+    agent_last_updated = Column(DateTime, nullable=True)  # Last agent update
+    chat_model_provider = Column(String, nullable=True)  # LLM provider: 'google', 'openai', 'anthropic'
+    chat_model_config = Column(JSON, nullable=True)  # Additional model parameters
     
     # Access control within organization
     allow_download = Column(Boolean, default=True)
