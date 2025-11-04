@@ -24,7 +24,7 @@ python setup_fresh_install.py
 
 ### Default Admin Credentials
 - **Email**: admin@example.com
-- **Password**: admin123
+- **Password**: SuperAdmin123!
 
 ## ✨ Key Features
 
@@ -179,7 +179,7 @@ All environment variables are managed through the unified `.env` file and can be
 
 ### Admin Panel Management
 Access environment settings through:
-1. Login as admin (admin@example.com / admin123)
+1. Login as admin (admin@example.com / SuperAdmin123!)
 2. Go to Admin Panel
 3. Click "Environment Settings"
 4. Edit variables by category

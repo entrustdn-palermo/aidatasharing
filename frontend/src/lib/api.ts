@@ -10,7 +10,7 @@ const apiClient = axios.create({
   },
 });
 
-// Add request interceptor to include auth token
+// Add request interceptor to include auth token and handle trailing slashes
 apiClient.interceptors.request.use(
   (config) => {
     // Check for both token names for backward compatibility
@@ -18,6 +18,12 @@ apiClient.interceptors.request.use(
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
+
+    // Add trailing slash to avoid 307 redirects (FastAPI requirement)
+    if (config.url && !config.url.endsWith('/') && !config.url.includes('?')) {
+      config.url = config.url + '/';
+    }
+
     return config;
   },
   (error) => {
@@ -42,10 +48,11 @@ apiClient.interceptors.response.use(
 // Auth API
 export const authAPI = {
   login: async (email: string, password: string) => {
-    const formData = new FormData();
+    // Use URLSearchParams for proper application/x-www-form-urlencoded encoding
+    const formData = new URLSearchParams();
     formData.append('username', email);
     formData.append('password', password);
-    
+
     const response = await apiClient.post('/api/auth/login', formData, {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -321,10 +328,10 @@ export const datasetsAPI = {
     sharing_level?: string;
     dataset_type?: string;
   }) => {
-    const response = await apiClient.get('/api/datasets', { params });
+    const response = await apiClient.get('/api/datasets/', { params });
     return response.data;
   },
-  
+
   createDataset: async (datasetData: {
     name: string;
     description?: string;
@@ -336,7 +343,7 @@ export const datasetsAPI = {
     allow_download?: boolean;
     allow_api_access?: boolean;
   }) => {
-    const response = await apiClient.post('/api/datasets', datasetData);
+    const response = await apiClient.post('/api/datasets/', datasetData);
     return response.data;
   },
   

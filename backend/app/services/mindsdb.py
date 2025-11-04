@@ -1144,42 +1144,68 @@ class MindsDBService:
             if not self._ensure_connection():
                 return {"success": False, "error": "MindsDB connection not available"}
 
-            # Generate clean database name for the file
+            # Generate clean database name and file name for MindsDB
             clean_name = f"file_db_{file_upload.id}"
-            
+            mindsdb_file_name = f"dataset_{file_upload.dataset_id}_file_{file_upload.id}"
+
             # Determine the appropriate engine and parameters based on file type
             file_ext = os.path.splitext(file_upload.original_filename.lower())[1].lstrip('.')
-            
-            if file_ext in ['csv', 'tsv']:
-                # Use files engine for CSV/TSV files
-                connection_params = {
-                    "file": file_upload.file_path
-                }
-                engine = "files"
-            elif file_ext in ['xlsx', 'xls']:
-                # Use files engine for Excel files  
-                connection_params = {
-                    "file": file_upload.file_path
-                }
-                engine = "files"
-            elif file_ext in ['json']:
-                # Use files engine for JSON files
-                connection_params = {
-                    "file": file_upload.file_path
-                }
-                engine = "files"
-            elif file_ext in ['parquet']:
-                # Use files engine for Parquet files
-                connection_params = {
-                    "file": file_upload.file_path
-                }
-                engine = "files"
-            else:
-                # Default to files engine for other file types
-                connection_params = {
-                    "file": file_upload.file_path
-                }
-                engine = "files"
+
+            # Download file from S3 and upload to MindsDB
+            logger.info(f"📤 Downloading file from S3 and uploading to MindsDB: {file_upload.original_filename}")
+
+            temp_file_path = None
+            uploaded_file_name = None
+
+            try:
+                # Download file from S3 using boto3
+                import boto3
+                import tempfile
+
+                s3_client = boto3.client(
+                    's3',
+                    aws_access_key_id=os.getenv('S3_ACCESS_KEY_ID'),
+                    aws_secret_access_key=os.getenv('S3_SECRET_ACCESS_KEY'),
+                    endpoint_url=os.getenv('S3_ENDPOINT_URL'),
+                    region_name=os.getenv('S3_REGION', 'us-east-1')
+                )
+
+                # Create temp file
+                temp_dir = tempfile.gettempdir()
+                temp_file_path = os.path.join(temp_dir, f"mindsdb_upload_{file_upload.id}_{file_upload.original_filename}")
+
+                # Download from S3
+                logger.info(f"⬇️  Downloading from S3: {file_upload.file_path}")
+                s3_client.download_file(
+                    os.getenv('S3_BUCKET_NAME'),
+                    file_upload.file_path,
+                    temp_file_path
+                )
+                logger.info(f"✅ Downloaded to temp: {temp_file_path}")
+
+                # Upload to MindsDB
+                uploaded_file_name = self.upload_file_to_mindsdb(temp_file_path, mindsdb_file_name)
+
+                if not uploaded_file_name:
+                    raise Exception("Failed to upload file to MindsDB")
+
+                logger.info(f"✅ File uploaded to MindsDB as: {uploaded_file_name}")
+
+            except Exception as download_error:
+                logger.error(f"❌ Failed to download/upload file: {download_error}")
+                raise Exception(f"Failed to prepare file for MindsDB: {download_error}")
+            finally:
+                # Clean up temp file
+                if temp_file_path and os.path.exists(temp_file_path):
+                    try:
+                        os.remove(temp_file_path)
+                        logger.debug(f"🧹 Cleaned up temp file: {temp_file_path}")
+                    except:
+                        pass
+
+            # Create database connector using files engine with uploaded file
+            connection_params = {"file": uploaded_file_name}
+            engine = "files"
 
             # Create the database connector using MindsDB SQL
             create_db_sql = f"""
@@ -1204,6 +1230,7 @@ class MindsDBService:
                     "engine": engine,
                     "file_path": file_upload.file_path,
                     "file_type": file_ext,
+                    "uploaded_filename": uploaded_file_name,  # Return the uploaded filename
                     "test_result": test_result,
                     "message": f"File database connector {clean_name} created successfully"
                 }
@@ -1438,10 +1465,10 @@ class MindsDBService:
             else:
                 # For uploaded files, ensure they have a database connector
                 logger.info(f"🗄️ Processing uploaded file dataset: {dataset.name}")
-                
+
                 # Check if this is a multi-file dataset
                 if dataset.is_multi_file_dataset:
-                    logger.info(f"📁 Processing multi-file dataset with {dataset.file_count or 'multiple'} files")
+                    logger.info(f"📁 Processing multi-file dataset with {dataset.total_files_count or 'multiple'} files")
                     
                     # Get the primary file for multi-file datasets
                     from app.models.dataset import DatasetFile
@@ -2047,6 +2074,49 @@ Please provide a comprehensive answer about this dataset:"""
             logger.error(f"❌ Error uploading to MindsDB: {e}")
             return None
 
+    def delete_file_from_mindsdb(self, file_name: str) -> bool:
+        """Delete file from MindsDB files database."""
+        try:
+            logger.info(f"🗑️  Deleting file from MindsDB: {file_name}")
+
+            # Delete file using MindsDB API
+            response = requests.delete(
+                f"{self.base_url}/api/files/{file_name}"
+            )
+
+            if response.status_code in [200, 204]:
+                logger.info(f"✅ Successfully deleted file from MindsDB: {file_name}")
+                return True
+            elif response.status_code == 404:
+                logger.warning(f"⚠️  File not found in MindsDB: {file_name}")
+                return True  # Consider success if file doesn't exist
+            else:
+                logger.error(f"❌ Failed to delete file from MindsDB: {response.status_code} - {response.text}")
+                return False
+
+        except Exception as e:
+            logger.error(f"❌ Error deleting file from MindsDB: {e}")
+            return False
+
+    def delete_database_connector(self, database_name: str) -> bool:
+        """Delete database connector from MindsDB."""
+        try:
+            if not self._ensure_connection():
+                return False
+
+            logger.info(f"🗑️  Deleting database connector: {database_name}")
+
+            # Drop database using MindsDB SQL
+            drop_db_sql = f"DROP DATABASE IF EXISTS {database_name};"
+            self.connection.query(drop_db_sql)
+
+            logger.info(f"✅ Successfully deleted database connector: {database_name}")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Error deleting database connector {database_name}: {e}")
+            return False
+
     def create_model_for_uploaded_file(self, file_name: str, file_type: str) -> Optional[str]:
         """Create appropriate MindsDB model based on file type."""
         
@@ -2312,16 +2382,14 @@ Please provide a comprehensive answer about this dataset:"""
             except Exception as e:
                 logger.info(f"Agent {agent_name} not found, creating new one...")
 
-            # Create new agent
-            model_cfg = model_config or self.get_model_config()
-
+            # Create new agent using MindsDB's pre-configured LLM
+            # Don't pass model config - let MindsDB use its default configured LLM (OpenAI-based)
             logger.info(f"🤖 Creating agent '{agent_name}' with {len(tables)} tables")
+            logger.info(f"📡 Using MindsDB's pre-configured LLM (OpenAI-based URL)")
             logger.debug(f"Agent tables: {tables}")
-            logger.debug(f"Model config: {model_cfg.get('provider')} - {model_cfg.get('model_name')}")
 
             agent = self.connection.agents.create(
                 name=agent_name,
-                model=model_cfg,
                 data={'tables': tables},
                 prompt_template=prompt_template
             )
@@ -2485,15 +2553,11 @@ Please provide a comprehensive answer about this dataset:"""
             # Build comprehensive prompt template
             prompt_template = self._build_single_file_prompt(dataset, file_upload, database_name, table_name)
 
-            # Get model configuration
-            model_config = self.get_model_config(dataset)
-
-            # Create or get agent
+            # Create or get agent (using MindsDB's pre-configured LLM)
             agent_result = self.create_or_get_agent(
                 agent_name=agent_name,
                 tables=[full_table_ref],
-                prompt_template=prompt_template,
-                model_config=model_config
+                prompt_template=prompt_template
             )
 
             if not agent_result.get("success"):
@@ -2649,13 +2713,20 @@ Please provide helpful, accurate, and data-driven responses based on the actual 
                     logger.warning(f"  ⚠️  No upload record found for {dataset_file.filename}, skipping")
                     continue
 
-                # Create database connector for this file
+                # Upload file to MindsDB and get the file reference
                 connector_result = self.create_file_database_connector(file_upload)
 
                 if connector_result.get("success"):
-                    database_name = connector_result["database_name"]
-                    table_name = connector_result.get("test_result", {}).get("table_name", "data")
-                    full_table_ref = f"{database_name}.{table_name}"
+                    # Use direct file reference in MindsDB files database
+                    # Format: files.{uploaded_filename}
+                    uploaded_filename = connector_result.get("uploaded_filename")
+                    if uploaded_filename:
+                        full_table_ref = f"files.{uploaded_filename}"
+                    else:
+                        # Fallback to old connector format if upload didn't happen
+                        database_name = connector_result["database_name"]
+                        table_name = connector_result.get("test_result", {}).get("table_name", "data")
+                        full_table_ref = f"{database_name}.{table_name}"
 
                     all_tables.append(full_table_ref)
 
@@ -2683,15 +2754,11 @@ Please provide helpful, accurate, and data-driven responses based on the actual 
                 dataset, dataset_files, file_descriptions, all_tables
             )
 
-            # Get model configuration
-            model_config = self.get_model_config(dataset)
-
-            # Create or get agent with ALL tables
+            # Create or get agent with ALL tables (using MindsDB's pre-configured LLM)
             agent_result = self.create_or_get_agent(
                 agent_name=agent_name,
                 tables=all_tables,  # ← ALL FILES!
-                prompt_template=prompt_template,
-                model_config=model_config
+                prompt_template=prompt_template
             )
 
             if not agent_result.get("success"):

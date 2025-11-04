@@ -46,6 +46,8 @@ backend/app.db
 *.db
 !storage/aishare_platform.db
 *.sqlite3
+*.sql
+sql/
 backend/backups/
 backend/app.db.backup*
 

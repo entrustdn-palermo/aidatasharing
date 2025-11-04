@@ -637,12 +637,43 @@ async def delete_dataset(
             detail="Can only delete your own datasets"
         )
     
-    # Clean up associated ML models first
+    # Clean up associated ML models and MindsDB files first
     try:
         ml_cleanup_result = mindsdb_service.delete_dataset_models(dataset_id)
         logger.info(f"ML models cleanup result: {ml_cleanup_result}")
     except Exception as e:
         logger.warning(f"ML models cleanup failed: {e}")
+
+    # Clean up MindsDB uploaded files, database connectors, and S3 files
+    try:
+        from app.models.file_handler import FileUpload
+        file_uploads = db.query(FileUpload).filter(
+            FileUpload.dataset_id == dataset_id
+        ).all()
+
+        for file_upload in file_uploads:
+            # Delete file from MindsDB files database
+            mindsdb_file_name = f"dataset_{file_upload.dataset_id}_file_{file_upload.id}"
+            mindsdb_service.delete_file_from_mindsdb(mindsdb_file_name)
+
+            # Delete database connector
+            connector_name = f"file_db_{file_upload.id}"
+            mindsdb_service.delete_database_connector(connector_name)
+
+            # Delete file from S3/MinIO storage
+            if file_upload.file_path:
+                try:
+                    success = await storage_service.delete_dataset_file(file_upload.file_path)
+                    if success:
+                        logger.info(f"✅ Deleted file from S3: {file_upload.file_path}")
+                    else:
+                        logger.warning(f"⚠️  Failed to delete from S3: {file_upload.file_path}")
+                except Exception as s3_error:
+                    logger.warning(f"⚠️  S3 deletion error for {file_upload.file_path}: {s3_error}")
+
+        logger.info(f"✅ Cleaned up {len(file_uploads)} MindsDB files, connectors, and S3 files")
+    except Exception as e:
+        logger.warning(f"MindsDB and S3 file cleanup failed: {e}")
     
     # Clean up all associated files (for both single and multi-file datasets)
     file_deletion_results = []
@@ -655,32 +686,52 @@ async def delete_dataset(
     ).all()
     
     if dataset_files:
-        # Delete all files from DatasetFile records
+        # Delete all files from DatasetFile records (both S3 and local)
         logger.info(f"Found {len(dataset_files)} files in DatasetFile table for dataset {dataset_id}")
         for dataset_file in dataset_files:
             try:
-                if dataset_file.file_path and os.path.exists(dataset_file.file_path):
+                deleted_from_storage = False
+
+                # Try to delete from S3/MinIO storage first
+                if dataset_file.file_path:
+                    try:
+                        success = await storage_service.delete_dataset_file(dataset_file.file_path)
+                        if success:
+                            logger.info(f"✅ Deleted file from S3/storage: {dataset_file.file_path}")
+                            deleted_from_storage = True
+                            file_deletion_results.append({
+                                "file": dataset_file.filename,
+                                "success": True,
+                                "method": "storage_service_s3"
+                            })
+                        else:
+                            logger.warning(f"⚠️  Failed to delete from storage: {dataset_file.file_path}")
+                    except Exception as storage_error:
+                        logger.warning(f"⚠️  Storage deletion error: {storage_error}")
+
+                # Fallback to local file deletion if storage deletion failed
+                if not deleted_from_storage and dataset_file.file_path and os.path.exists(dataset_file.file_path):
                     os.remove(dataset_file.file_path)
-                    logger.info(f"Deleted file: {dataset_file.file_path}")
+                    logger.info(f"✅ Deleted local file: {dataset_file.file_path}")
                     file_deletion_results.append({
                         "file": dataset_file.filename,
                         "success": True,
-                        "method": "direct_file_deletion"
+                        "method": "local_file_deletion"
                     })
-                else:
-                    logger.warning(f"File not found: {dataset_file.file_path}")
+                elif not deleted_from_storage:
+                    logger.warning(f"⚠️  File not found in storage or locally: {dataset_file.file_path}")
                     file_deletion_results.append({
                         "file": dataset_file.filename,
                         "success": False,
-                        "error": "File not found on disk"
+                        "error": "File not found in storage or locally"
                     })
-                
+
                 # Mark the DatasetFile record as deleted
                 dataset_file.is_deleted = True
                 dataset_file.deleted_at = datetime.utcnow()
-                
+
             except Exception as e:
-                logger.error(f"Error deleting file {dataset_file.filename}: {e}")
+                logger.error(f"❌ Error deleting file {dataset_file.filename}: {e}")
                 file_deletion_results.append({
                     "file": dataset_file.filename,
                     "success": False,
@@ -1047,8 +1098,39 @@ async def upload_dataset_file(
         
         # Commit file records
         db.commit()
-        
+
+        # Create FileUpload records for MindsDB agent compatibility
+        from app.models.file_handler import FileUpload
+        import hashlib
+
+        for stored_file_info in stored_files:
+            dataset_file = stored_file_info['file_record']
+
+            # Generate file hash
+            file_hash = hashlib.md5(dataset_file.filename.encode()).hexdigest()
+
+            # Create FileUpload record
+            file_upload = FileUpload(
+                dataset_id=temp_dataset.id,
+                user_id=current_user.id,
+                organization_id=current_user.organization_id,
+                original_filename=dataset_file.filename,
+                file_path=dataset_file.file_path,
+                file_size=dataset_file.file_size,
+                file_hash=file_hash,
+                mime_type=dataset_file.mime_type,
+                file_type=dataset_file.file_type,
+                upload_status='completed',
+                mindsdb_file_id=None,
+                created_at=datetime.utcnow()
+            )
+            db.add(file_upload)
+
+        # Commit FileUpload records
+        db.commit()
+
         logger.info(f"✅ {len(stored_files)} files stored successfully for dataset {temp_dataset.id}")
+        logger.info(f"✅ Created {len(stored_files)} FileUpload records for MindsDB integration")
         
     except Exception as e:
         # Clean up dataset record if storage fails
@@ -1187,7 +1269,7 @@ async def upload_dataset_file(
         # Enhanced schema metadata
         schema_metadata = {
             "file_type": file_extension,
-            "original_filename": file.filename,
+            "original_filename": primary_upload_file.filename,
             "encoding": "utf-8",  # Default assumption
             "structure": file_metadata.get("structure", {}),
             "columns": file_metadata.get("columns", []),
@@ -1635,68 +1717,14 @@ async def chat_with_dataset(
         )
 
     try:
-        # Try agent-based chat first if enabled
-        if use_agents:
-            try:
-                from app.services.agent_service import create_agent_service
-                agent_service = create_agent_service(db)
-
-                agent_response = agent_service.chat_with_dataset(
-                    dataset_id=dataset_id,
-                    message=user_message,
-                    agent_name=agent_name,
-                    user_id=current_user.id
-                )
-
-                if agent_response.get("success"):
-                    # Log the interaction
-                    data_service.log_access(
-                        user=current_user,
-                        dataset=dataset,
-                        access_type="agent_chat"
-                    )
-
-                    # Check if we have visualizations
-                    has_viz = bool(
-                        agent_response.get("plotly_figures") or
-                        agent_response.get("matplotlib_figures") or
-                        agent_response.get("visualizations")
-                    )
-
-                    return {
-                        "dataset_id": dataset_id,
-                        "dataset_name": dataset.name,
-                        "question": user_message,
-                        "model_type": "agent",
-                        "agent_used": agent_response.get("agent"),
-                        "answer": agent_response.get("response"),
-                        "response": agent_response.get("response"),
-                        "code": agent_response.get("code"),
-                        "planner": agent_response.get("planner"),
-                        "timestamp": agent_response.get("timestamp"),
-                        "has_visualizations": has_viz,
-                        "agent_system": True,
-                        # Include visualization data
-                        "plotly_figures": agent_response.get("plotly_figures", []),
-                        "matplotlib_figures": agent_response.get("matplotlib_figures", []),
-                        "visualizations": agent_response.get("visualizations", []),
-                        "execution_output": agent_response.get("execution_output")
-                    }
-                else:
-                    logger.warning(f"Agent chat failed, falling back to MindsDB: {agent_response.get('error')}")
-
-            except ImportError:
-                logger.warning("Agent service not available, falling back to MindsDB")
-            except Exception as e:
-                logger.warning(f"Agent chat error, falling back to MindsDB: {str(e)}")
-
-        # Fallback to original MindsDB chat
-        response = mindsdb_service.chat_with_dataset(
-            dataset_id=str(dataset_id),
+        # Use MindsDB agent-based chat directly (with agent creation and SQL capabilities)
+        # Skip DSPy agents as per user requirement: "turn all into chat_with_dataset_agent()"
+        response = mindsdb_service.chat_with_dataset_agent(
+            dataset_id=dataset_id,
             message=user_message,
-            user_id=current_user.id,
+            db=db,
             session_id=message.get("session_id"),
-            organization_id=current_user.organization_id
+            stream=True
         )
 
         # Log the interaction
@@ -1710,8 +1738,8 @@ async def chat_with_dataset(
             "dataset_id": dataset_id,
             "dataset_name": dataset.name,
             "question": user_message,
-            "model_type": "chat",
-            "agent_system": False,
+            "model_type": "agent_chat",
+            "agent_system": True,
             **response
         }
 

@@ -14,7 +14,7 @@ from app.core.auth import get_current_user, get_optional_user
 from app.models.user import User
 from app.models.proxy_connector import ProxyConnector, SharedProxyLink, ProxyAccessLog
 from app.services.proxy_service import ProxyService
-from app.services.integrated_proxy_service import integrated_proxy
+# from app.services.integrated_proxy_service import integrated_proxy  # Archived
 from app.utils.proxy_url_converter import get_corrected_proxy_url, convert_proxy_urls_in_response
 
 logger = logging.getLogger(__name__)
