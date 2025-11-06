@@ -186,10 +186,10 @@ export default function SharedDatasetPage() {
 
   const handleChat = async () => {
     if (!chatMessage.trim() || !token) return;
-    
+
     const userMessage = chatMessage.trim();
     setChatMessage('');
-    
+
     // Add user message to history
     const newUserMessage = {
       id: Date.now(),
@@ -198,18 +198,39 @@ export default function SharedDatasetPage() {
       timestamp: new Date().toISOString()
     };
     setChatHistory(prev => [...prev, newUserMessage]);
-    
+
     try {
       setIsChatting(true);
       const response = await dataSharingAPI.chatWithSharedDataset(token, userMessage);
-      
+
+      // Parse MindsDB agent response if present
+      let answerText = response.answer || response.response || 'No response received';
+
+      // Handle AgentCompletion format from MindsDB
+      if (typeof answerText === 'string' && answerText.includes('AgentCompletion')) {
+        // Extract content from AgentCompletion(content: "...", ...)
+        const contentMatch = answerText.match(/content:\s*["`'](.+?)["`']/) ||
+                            answerText.match(/content:\s*(.+?)(?:,|\))/);
+        if (contentMatch) {
+          answerText = contentMatch[1].trim();
+        } else {
+          // Fallback: try to extract text between quotes
+          const simpleMatch = answerText.match(/["'](.+?)["']/);
+          if (simpleMatch) {
+            answerText = simpleMatch[1];
+          }
+        }
+      }
+
       // Add AI response to history
       const aiMessage = {
         id: Date.now() + 1,
         type: 'ai',
-        message: response.answer || response.response || 'No response received',
+        message: answerText,
         timestamp: new Date().toISOString(),
         model: response.model,
+        source: response.source, // Track if using agent or fallback
+        agent_name: response.agent_name, // Track agent name
         tokens_used: response.tokens_used,
         visualizations: response.visualizations,
         dataAnalysis: response.data_analysis,
@@ -217,10 +238,10 @@ export default function SharedDatasetPage() {
         error: false
       };
       setChatHistory(prev => [...prev, aiMessage]);
-      
+
     } catch (error: any) {
       console.error('Chat failed:', error);
-      
+
       // Add error message to history
       const errorMessage = {
         id: Date.now() + 1,

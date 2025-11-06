@@ -163,7 +163,7 @@ export default function SharedDatasetPage() {
                   </p>
                   <Link href="/">
                     <Button variant="gradient" className="w-full">
-                      Go to AI Share Platform
+                      Go to Entrust MCP Platform
                     </Button>
                   </Link>
                 </div>
@@ -191,7 +191,7 @@ export default function SharedDatasetPage() {
                 </p>
                 <Link href="/">
                   <Button variant="gradient" className="w-full">
-                    Go to AI Share Platform
+                    Go to Entrust MCP Platform
                   </Button>
                 </Link>
               </CardContent>
@@ -215,7 +215,7 @@ export default function SharedDatasetPage() {
                 </div>
               </div>
               <div>
-                <h1 className="text-lg font-semibold text-gray-900">AI Share Platform</h1>
+                <h1 className="text-lg font-semibold text-gray-900">Entrust MCP Platform</h1>
                 <p className="text-xs text-gray-500">Shared Dataset View</p>
               </div>
             </div>

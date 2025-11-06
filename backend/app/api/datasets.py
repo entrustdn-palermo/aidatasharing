@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Body
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from typing import List, Optional, Dict, Any
@@ -228,7 +229,7 @@ async def create_dataset(
     
     return db_dataset
 
-@router.get("/{dataset_id}", response_model=DatasetResponse)
+@router.get("/{dataset_id}")
 async def get_dataset(
     dataset_id: int,
     db: Session = Depends(get_db),
@@ -237,7 +238,7 @@ async def get_dataset(
     """Get a specific dataset if accessible to the user."""
     logger.info(f"🔍 GET dataset {dataset_id} called by user {current_user.id}")
     data_service = DataSharingService(db)
-    
+
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         logger.warning(f"❌ Dataset {dataset_id} not found in database")
@@ -245,9 +246,9 @@ async def get_dataset(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Dataset not found"
         )
-    
+
     logger.info(f"✅ Found dataset {dataset_id}: name='{dataset.name}', type={dataset.type}, status={dataset.status}")
-    
+
     # Check access permissions
     if not data_service.can_access_dataset(current_user, dataset):
         logger.warning(f"❌ User {current_user.id} denied access to dataset {dataset_id}")
@@ -255,16 +256,60 @@ async def get_dataset(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied to this dataset"
         )
-    
+
     # Log access
     data_service.log_access(
         user=current_user,
         dataset=dataset,
         access_type="view"
     )
-    
-    logger.info(f"📤 Returning dataset {dataset_id} to user {current_user.id}")
-    return dataset
+
+    # Build response with files included
+    from app.models.dataset import DatasetFile
+    from app.models.file_handler import FileUpload
+
+    # Get files from both DatasetFile and FileUpload tables
+    dataset_files = db.query(DatasetFile).filter(
+        DatasetFile.dataset_id == dataset_id,
+        DatasetFile.is_deleted == False
+    ).all()
+
+    # If no DatasetFile records, check FileUpload (MindsDB agent files)
+    if not dataset_files:
+        file_uploads = db.query(FileUpload).filter(
+            FileUpload.dataset_id == dataset_id
+        ).all()
+        dataset_files = file_uploads
+
+    # Convert dataset to dict and add files
+    from sqlalchemy.inspection import inspect
+    dataset_dict = {c.key: getattr(dataset, c.key) for c in inspect(dataset).mapper.column_attrs}
+
+    # Add files with proper field mapping
+    dataset_dict['files'] = []
+    for f in dataset_files:
+        file_dict = {
+            'id': f.id,
+            'filename': getattr(f, 'filename', None) or getattr(f, 'original_filename', 'unknown'),
+            'file_path': f.file_path,
+            'file_size': getattr(f, 'file_size', 0),
+            'file_type': getattr(f, 'file_type', None),
+            'mime_type': getattr(f, 'mime_type', None),
+            'created_at': getattr(f, 'created_at', None).isoformat() if hasattr(f, 'created_at') and getattr(f, 'created_at') else None
+        }
+        dataset_dict['files'].append(file_dict)
+
+    # Add computed fields
+    dataset_dict['is_multi_file'] = len(dataset_files) > 1
+    dataset_dict['total_files_count'] = len(dataset_files)
+
+    # Convert datetime objects to ISO format
+    for key in ['created_at', 'updated_at', 'last_accessed', 'deleted_at', 'last_downloaded_at', 'ai_processed_at', 'share_expires_at', 'agent_created_at', 'agent_last_updated']:
+        if key in dataset_dict and dataset_dict[key]:
+            dataset_dict[key] = dataset_dict[key].isoformat()
+
+    logger.info(f"📤 Returning dataset {dataset_id} with {len(dataset_files)} files to user {current_user.id}")
+    return dataset_dict
 
 @router.put("/{dataset_id}", response_model=DatasetResponse)
 @router.put("/{dataset_id}/metadata", response_model=DatasetResponse)
@@ -637,12 +682,13 @@ async def delete_dataset(
             detail="Can only delete your own datasets"
         )
     
-    # Clean up associated ML models and MindsDB files first
+    # Clean up associated MindsDB agents first
     try:
-        ml_cleanup_result = mindsdb_service.delete_dataset_models(dataset_id)
-        logger.info(f"ML models cleanup result: {ml_cleanup_result}")
+        if dataset.agent_name:
+            mindsdb_service.delete_agent(dataset.agent_name)
+            logger.info(f"Agent {dataset.agent_name} deleted")
     except Exception as e:
-        logger.warning(f"ML models cleanup failed: {e}")
+        logger.warning(f"Agent cleanup failed: {e}")
 
     # Clean up MindsDB uploaded files, database connectors, and S3 files
     try:
@@ -1336,54 +1382,10 @@ async def upload_dataset_file(
     db.add(db_dataset)
     db.commit()
     db.refresh(db_dataset)
-    
-    # Automatically create ML models for this dataset
-    ml_model_result = None
-    try:
-        logger.info(f"Creating ML models for dataset {db_dataset.id}: {dataset_name}")
-        
-        # Try to create the ML model with retry logic
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                # For multi-file datasets, use primary file content for ML model
-                model_content = content_preview or f"Multi-file dataset with {len(stored_files)} files"
-                
-                ml_model_result = mindsdb_service.create_dataset_ml_model(
-                    dataset_id=db_dataset.id,
-                    dataset_name=dataset_name,
-                    dataset_type=dataset_type.value,
-                    dataset_content=model_content
-                )
-                
-                if ml_model_result.get("success"):
-                    logger.info(f"ML models created successfully for dataset {db_dataset.id} on attempt {attempt + 1}")
-                    break
-                else:
-                    logger.warning(f"ML model creation failed for dataset {db_dataset.id} on attempt {attempt + 1}: {ml_model_result.get('error')}")
-                    if attempt == max_retries - 1:  # Last attempt
-                        logger.error(f"All attempts failed for ML model creation for dataset {db_dataset.id}")
-                    else:
-                        time.sleep(2)  # Wait before retry
-                        
-            except Exception as e:
-                logger.error(f"Exception during ML model creation attempt {attempt + 1} for dataset {db_dataset.id}: {e}")
-                if attempt == max_retries - 1:  # Last attempt
-                    ml_model_result = {
-                        "success": False,
-                        "error": str(e),
-                        "message": "ML model creation failed after all retry attempts"
-                    }
-                else:
-                    time.sleep(2)  # Wait before retry
-            
-    except Exception as e:
-        logger.error(f"Error in ML model creation process for dataset {db_dataset.id}: {e}")
-        ml_model_result = {
-            "success": False,
-            "error": str(e),
-            "message": "ML model creation failed but dataset was uploaded successfully"
-        }
+
+    # No longer creating ML models automatically - agent-based chat works directly with files
+    # Agent-based architecture uses MindsDB agents that query files directly via databases
+    logger.info(f"✅ Dataset {db_dataset.id} created successfully. Agent-based chat will handle queries on-demand.")
     
     # Automatically create share link if sharing level is not private
     if sharing_level_enum != DataSharingLevel.PRIVATE:
@@ -1412,25 +1414,17 @@ async def upload_dataset_file(
     response_data = {
         "message": "Dataset uploaded successfully",
         "dataset": db_dataset,
-        "ml_models": ml_model_result
+        "agent_based_chat": True  # Using agent-based architecture
     }
 
-    # Add helpful information about AI chat availability
-    if ml_model_result and ml_model_result.get("success"):
-        response_data["ai_chat_available"] = True
-        response_data["chat_model_name"] = ml_model_result.get("chat_model")
-        response_data["ai_features"] = {
-            "chat_enabled": True,
-            "model_ready": True,
-            "chat_endpoint": f"/api/datasets/{db_dataset.id}/chat"
-        }
-    else:
-        response_data["ai_chat_available"] = False
-        response_data["ai_features"] = {
-            "chat_enabled": False,
-            "model_ready": False,
-            "error": ml_model_result.get("error") if ml_model_result else "Unknown error",
-            "retry_endpoint": f"/api/datasets/{db_dataset.id}/recreate-models"
+    # AI chat is always available with agent-based architecture
+    response_data["ai_chat_available"] = True
+    response_data["ai_features"] = {
+        "chat_enabled": True,
+        "model_ready": True,  # Agent creates resources on-demand
+        "architecture": "agent_based",
+        "chat_endpoint": f"/api/datasets/{db_dataset.id}/chat",
+        "supports_multi_file": db_dataset.is_multi_file_dataset
         }
     
     return response_data
@@ -1443,16 +1437,256 @@ async def download_dataset(
 ):
     """Download a dataset file with secure token-based access."""
     from app.services.download import DownloadService
-    
+
     download_service = DownloadService(db)
-    
+
     # Initiate download and get secure token
     download_info = await download_service.initiate_download(
         dataset_id=dataset_id,
         user=current_user
     )
-    
+
     return download_info
+
+@router.get("/{dataset_id}/download-all")
+async def download_all_files(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Download all files from a multi-file dataset as a ZIP archive.
+
+    For single-file datasets, returns the single file.
+    For multi-file datasets, creates a ZIP archive containing all files.
+    """
+    import io
+    import zipfile
+    from app.models.dataset import DatasetFile
+    from app.services.data_sharing import DataSharingService
+
+    # Get dataset and check permissions
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dataset not found"
+        )
+
+    # Check permissions using data sharing service
+    data_sharing_service = DataSharingService(db)
+    has_access = data_sharing_service.can_access_dataset(current_user, dataset)
+
+    if not has_access:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have permission to download this dataset"
+        )
+
+    # Log download access
+    data_sharing_service.log_access(
+        user=current_user,
+        dataset=dataset,
+        access_type="download_all"
+    )
+
+    # Get all files for this dataset from DatasetFile table
+    dataset_files = db.query(DatasetFile).filter(
+        DatasetFile.dataset_id == dataset_id,
+        DatasetFile.is_deleted == False
+    ).order_by(DatasetFile.file_order).all()
+
+    # If no DatasetFile records, try FileUpload records (MindsDB agent files)
+    if not dataset_files:
+        from app.models.file_handler import FileUpload
+        file_uploads = db.query(FileUpload).filter(
+            FileUpload.dataset_id == dataset_id
+        ).all()
+
+        if file_uploads:
+            # Use FileUpload records - they have the same fields we need
+            logger.info(f"Found {len(file_uploads)} files in FileUpload table for dataset {dataset_id}")
+            dataset_files = file_uploads
+        elif dataset.file_path:
+            # No multi-file records, try legacy single file download
+            from app.services.download import DownloadService
+            download_service = DownloadService(db)
+            download_info = await download_service.initiate_download(
+                dataset_id=dataset_id,
+                user=current_user
+            )
+            return download_info
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No files found for this dataset"
+            )
+
+    # If only one file, download it directly
+    if len(dataset_files) == 1:
+        single_file = dataset_files[0]
+        try:
+            # Get file from storage
+            file_response = await storage_service.get_file_stream(single_file.file_path)
+
+            # Set proper filename (handle both DatasetFile.filename and FileUpload.original_filename)
+            filename = getattr(single_file, 'filename', None) or getattr(single_file, 'original_filename', 'download')
+            file_response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+
+            # Update dataset download statistics
+            dataset.download_count = (dataset.download_count or 0) + 1
+            dataset.last_downloaded_at = datetime.utcnow()
+            db.commit()
+
+            return file_response
+        except Exception as e:
+            logger.error(f"Failed to download single file: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to download file: {str(e)}"
+            )
+
+    # Multiple files - create ZIP archive
+    try:
+        # Create ZIP file in memory
+        zip_buffer = io.BytesIO()
+
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for dataset_file in dataset_files:
+                try:
+                    # Download file from storage
+                    file_content = await storage_service.get_file_content(dataset_file.file_path)
+
+                    # Get filename (handle both DatasetFile.filename and FileUpload.original_filename)
+                    filename = getattr(dataset_file, 'filename', None) or getattr(dataset_file, 'original_filename', f'file_{dataset_file.id}')
+
+                    # Add file to ZIP with original filename
+                    zip_file.writestr(filename, file_content)
+                    logger.info(f"Added {filename} to ZIP")
+
+                except Exception as file_error:
+                    filename = getattr(dataset_file, 'filename', None) or getattr(dataset_file, 'original_filename', 'unknown')
+                    logger.error(f"Failed to add file {filename} to ZIP: {file_error}")
+                    # Continue with other files
+                    continue
+
+        # Prepare ZIP for download
+        zip_buffer.seek(0)
+
+        # Update dataset download statistics
+        dataset.download_count = (dataset.download_count or 0) + 1
+        dataset.last_downloaded_at = datetime.utcnow()
+        db.commit()
+
+        # Create safe filename for ZIP
+        safe_dataset_name = "".join(c for c in dataset.name if c.isalnum() or c in (' ', '-', '_')).strip()
+        zip_filename = f"{safe_dataset_name}_files.zip"
+
+        logger.info(f"✅ Created ZIP archive with {len(dataset_files)} files for dataset {dataset_id}")
+
+        return StreamingResponse(
+            io.BytesIO(zip_buffer.read()),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{zip_filename}"'
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to create ZIP archive: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create ZIP archive: {str(e)}"
+        )
+
+@router.get("/{dataset_id}/files/{file_id}/download")
+async def download_individual_file(
+    dataset_id: int,
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Download a specific file from a multi-file dataset.
+
+    Args:
+        dataset_id: ID of the dataset
+        file_id: ID of the specific file to download
+    """
+    from app.models.dataset import DatasetFile
+    from app.services.data_sharing import DataSharingService
+
+    # Get dataset and check permissions
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dataset not found"
+        )
+
+    # Check permissions using data sharing service
+    data_sharing_service = DataSharingService(db)
+    has_access = data_sharing_service.can_access_dataset(current_user, dataset)
+
+    if not has_access:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have permission to download this file"
+        )
+
+    # Try to get file from DatasetFile table first
+    dataset_file = db.query(DatasetFile).filter(
+        DatasetFile.id == file_id,
+        DatasetFile.dataset_id == dataset_id,
+        DatasetFile.is_deleted == False
+    ).first()
+
+    # If not found, try FileUpload table (MindsDB agent files)
+    if not dataset_file:
+        from app.models.file_handler import FileUpload
+        dataset_file = db.query(FileUpload).filter(
+            FileUpload.id == file_id,
+            FileUpload.dataset_id == dataset_id
+        ).first()
+
+    if not dataset_file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found in this dataset"
+        )
+
+    # Get filename (handle both DatasetFile.filename and FileUpload.original_filename)
+    filename = getattr(dataset_file, 'filename', None) or getattr(dataset_file, 'original_filename', 'download')
+
+    # Log download access
+    data_sharing_service.log_access(
+        user=current_user,
+        dataset=dataset,
+        access_type=f"download_file_{file_id}"
+    )
+
+    try:
+        # Get file from storage
+        file_response = await storage_service.get_file_stream(dataset_file.file_path)
+
+        # Set proper filename
+        file_response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+
+        # Update dataset download statistics
+        dataset.download_count = (dataset.download_count or 0) + 1
+        dataset.last_downloaded_at = datetime.utcnow()
+        db.commit()
+
+        logger.info(f"✅ Downloaded file {dataset_file.filename} (ID: {file_id}) from dataset {dataset_id}")
+
+        return file_response
+
+    except Exception as e:
+        logger.error(f"Failed to download file {file_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to download file: {str(e)}"
+        )
 
 @router.get("/download/{download_token}")
 async def execute_download(
@@ -1719,7 +1953,7 @@ async def chat_with_dataset(
     try:
         # Use MindsDB agent-based chat directly (with agent creation and SQL capabilities)
         # Skip DSPy agents as per user requirement: "turn all into chat_with_dataset_agent()"
-        response = mindsdb_service.chat_with_dataset_agent(
+        response = await mindsdb_service.chat_with_dataset_agent(
             dataset_id=dataset_id,
             message=user_message,
             db=db,
@@ -1840,23 +2074,32 @@ async def recreate_dataset_models(
         )
     
     try:
-        # First, clean up existing models
-        logger.info(f"Recreating ML models for dataset {dataset_id}")
-        cleanup_result = mindsdb_service.delete_dataset_models(dataset_id)
-        
-        # Create new models
-        ml_model_result = mindsdb_service.create_dataset_ml_model(
-            dataset_id=dataset_id,
-            dataset_name=dataset.name,
-            dataset_type=dataset.type.value
-        )
-        
+        # Recreate agent for the dataset
+        logger.info(f"Recreating agent for dataset {dataset_id}")
+
+        # Delete old agent if exists
+        if dataset.agent_name:
+            mindsdb_service.delete_agent(dataset.agent_name)
+            logger.info(f"Deleted old agent: {dataset.agent_name}")
+
+        # Create new agent based on dataset type
+        if dataset.is_multi_file_dataset:
+            agent_result = mindsdb_service.setup_multi_file_agent(dataset, db)
+        else:
+            agent_result = mindsdb_service.setup_single_file_agent(dataset, db)
+
+        if not agent_result.get("success"):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create agent: {agent_result.get('error')}"
+            )
+
         return {
-            "message": "Dataset models recreated successfully",
+            "message": "Dataset agent recreated successfully",
             "dataset_id": dataset_id,
             "dataset_name": dataset.name,
-            "cleanup_result": cleanup_result,
-            "creation_result": ml_model_result
+            "agent_name": agent_result.get("agent_name"),
+            "agent_status": agent_result.get("status")
         }
         
     except Exception as e:
@@ -2670,25 +2913,24 @@ async def reupload_dataset_file(
         db.commit()
         db.refresh(dataset)
         
-        # Try to recreate ML models for the new file
-        ml_model_result = None
+        # Try to recreate agent for the new file
+        agent_result = None
         try:
-            # Clean up old models first
-            cleanup_result = mindsdb_service.delete_dataset_models(dataset_id)
-            logger.info(f"Cleaned up old models for reuploaded dataset {dataset_id}: {cleanup_result}")
-            
-            # Create new models
-            ml_model_result = mindsdb_service.create_dataset_ml_model(
-                dataset_id=dataset_id,
-                dataset_name=dataset.name,
-                dataset_type=new_dataset_type.value,
-                dataset_content=content_preview
-            )
-            
-            if ml_model_result.get("success"):
-                logger.info(f"Successfully created new ML models for reuploaded dataset {dataset_id}")
+            # Clean up old agent first
+            if dataset.agent_name:
+                mindsdb_service.delete_agent(dataset.agent_name)
+                logger.info(f"Deleted old agent for reuploaded dataset {dataset_id}")
+
+            # Create new agent based on dataset type
+            if dataset.is_multi_file_dataset:
+                agent_result = mindsdb_service.setup_multi_file_agent(dataset, db)
             else:
-                logger.warning(f"ML model creation failed for reuploaded dataset {dataset_id}: {ml_model_result.get('error')}")
+                agent_result = mindsdb_service.setup_single_file_agent(dataset, db)
+
+            if agent_result and agent_result.get("success"):
+                logger.info(f"Successfully created new agent for reuploaded dataset {dataset_id}")
+            else:
+                logger.warning(f"Agent creation failed for reuploaded dataset {dataset_id}: {agent_result.get('error') if agent_result else 'Unknown error'}")
         
         except Exception as e:
             logger.error(f"Error recreating ML models for reuploaded dataset {dataset_id}: {e}")
@@ -2779,7 +3021,7 @@ async def visualize_dataset(
             )
         
         # Load dataset data
-        dataset_df = mindsdb_service._load_dataset_for_visualization(dataset, db)
+        dataset_df = await mindsdb_service._load_dataset_for_visualization(dataset, db)
         
         if dataset_df is None or dataset_df.empty:
             raise HTTPException(

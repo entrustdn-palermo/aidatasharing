@@ -53,10 +53,10 @@ function DatasetChatContent() {
 
   const handleChat = async () => {
     if (!chatMessage.trim()) return;
-    
+
     const userMessage = chatMessage.trim();
     setChatMessage('');
-    
+
     // Add user message to history
     const newUserMessage = {
       id: Date.now(),
@@ -65,20 +65,41 @@ function DatasetChatContent() {
       timestamp: new Date().toISOString()
     };
     setChatHistory(prev => [...prev, newUserMessage]);
-    
+
     try {
       setIsChatting(true);
 
       // Always use MindsDB agent-based chat (no agent selection needed)
       const response = await datasetsAPI.chatWithDataset(datasetId, userMessage, undefined, true);
 
+      // Parse MindsDB agent response if present
+      let answerText = response.answer || response.response || 'No response received';
+
+      // Handle AgentCompletion format from MindsDB
+      if (typeof answerText === 'string' && answerText.includes('AgentCompletion')) {
+        // Extract content from AgentCompletion(content: "...", ...)
+        const contentMatch = answerText.match(/content:\s*["`'](.+?)["`']/) ||
+                            answerText.match(/content:\s*(.+?)(?:,|\))/);
+        if (contentMatch) {
+          answerText = contentMatch[1].trim();
+        } else {
+          // Fallback: try to extract text between quotes
+          const simpleMatch = answerText.match(/["'](.+?)["']/);
+          if (simpleMatch) {
+            answerText = simpleMatch[1];
+          }
+        }
+      }
+
       // Add AI response to history
       const aiMessage = {
         id: Date.now() + 1,
         type: 'ai',
-        message: response.answer || response.response || 'No response received',
+        message: answerText,
         timestamp: new Date().toISOString(),
         model: response.model,
+        source: response.source, // Track if using agent or fallback
+        agent_name: response.agent_name, // Track agent name
         tokens_used: response.tokens_used,
         visualizations: response.visualizations || [], // New combined visualizations array
         plotly_figures: response.plotly_figures || [], // Plotly-specific figures
@@ -93,10 +114,10 @@ function DatasetChatContent() {
         error: false
       };
       setChatHistory(prev => [...prev, aiMessage]);
-      
+
     } catch (error: any) {
       console.error('Chat failed:', error);
-      
+
       // Add error message to history
       const errorMessage = {
         id: Date.now() + 1,
@@ -358,23 +379,23 @@ function DatasetChatContent() {
                   </h4>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                     {(dataset.is_multi_file ? [
-                      "📊 What data is in each file?",
-                      "🔗 Show me relationships between the files",
-                      "📈 Analyze patterns across all files",
-                      "💾 Summarize the entire dataset structure",
-                      "🔍 What insights can you find across the data?",
-                      "📋 Show statistics for all tables",
-                      "🎯 How are the files related?",
-                      "📊 Create a comprehensive analysis"
+                      "📊 Visualize the relationships between files",
+                      "📈 Show me charts comparing data across files",
+                      "🔗 Create a visualization of the data patterns",
+                      "📉 Analyze and chart trends in the dataset",
+                      "🎯 Display graphs showing key insights",
+                      "📊 Generate visualizations for all tables",
+                      "💡 Show me data distributions with charts",
+                      "🔍 Create visual analysis of correlations"
                     ] : [
-                      "📊 Show visualizations of this dataset",
-                      "📈 Analyze the data distribution with charts",
-                      "🔍 What are the key patterns and correlations?",
-                      "📉 Create statistical analysis with graphs",
-                      "💾 Summarize the dataset structure",
-                      "📋 Show me data quality issues",
-                      "🎯 What insights can you find?",
-                      "📊 Create a comprehensive data report"
+                      "📊 Create visualizations of this dataset",
+                      "📈 Show me charts of the data distribution",
+                      "🔍 Generate graphs showing patterns and trends",
+                      "📉 Visualize correlations and relationships",
+                      "💡 Display statistical charts and insights",
+                      "🎯 Create a visual analysis with graphs",
+                      "📊 Show me bar charts and scatter plots",
+                      "📈 Generate comprehensive data visualizations"
                     ]).map((suggestion, index) => (
                       <button
                         key={index}
@@ -395,7 +416,7 @@ function DatasetChatContent() {
                     <span className="text-blue-500 text-lg">🤖</span>
                   </div>
                   <div className="ml-3">
-                    <h4 className="text-sm font-medium text-gray-800">MindsDB Agent-Based Chat</h4>
+                    <h4 className="text-sm font-medium text-gray-800">MindsDB Agent-Based Chat with Visualizations</h4>
                     <p className="mt-1 text-sm text-gray-600">
                       Ask questions in natural language and get AI-powered insights using MindsDB agents.
                       {dataset.is_multi_file && (
@@ -406,11 +427,16 @@ function DatasetChatContent() {
                       )}
                       {' '}The agent can query your data using SQL, create visualizations, and provide detailed analysis.
                     </p>
-                    {!dataset.agent_name && (
-                      <p className="mt-2 text-xs text-blue-600 bg-blue-100 px-2 py-1 rounded inline-block">
-                        💡 The MindsDB agent will be created automatically when you send your first message
+                    <div className="mt-2 space-y-1">
+                      <p className="text-xs text-green-700 bg-green-50 px-2 py-1 rounded inline-block mr-2">
+                        ✨ Request charts and visualizations by using keywords like "visualize", "chart", "graph", "plot"
                       </p>
-                    )}
+                      {!dataset.agent_name && (
+                        <p className="text-xs text-blue-600 bg-blue-100 px-2 py-1 rounded inline-block">
+                          💡 The MindsDB agent will be created automatically when you send your first message
+                        </p>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>

@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI Share Platform",
-  description: "AI-powered data sharing platform with MindsDB",
+  title: "Entrust Data Sharing MCP Platform",
+  description: "Enterprise data sharing platform powered by MindsDB agents - supporting CSV, XLSX, XLS, JSON, TXT, PDF, and Parquet files",
 };
 
 export default function RootLayout({

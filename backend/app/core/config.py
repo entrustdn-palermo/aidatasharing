@@ -8,8 +8,8 @@ from .app_config import get_app_config
 class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     SECRET_KEY: str = secrets.token_urlsafe(32)
-    PROJECT_NAME: str = "AI Share Platform"
-    VERSION: str = "1.0.0"
+    PROJECT_NAME: str = "Entrust Data Sharing MCP Platform"
+    VERSION: str = "2.0.0"
     
     # Database - Single unified database location (loaded from .env)
     DATABASE_URL: str = Field(default=None, env="DATABASE_URL", description="Database connection URL")
@@ -79,24 +79,27 @@ class Settings(BaseSettings):
     MINDSDB_USERNAME: Optional[str] = None
     MINDSDB_PASSWORD: Optional[str] = None
     
-    # AI Model Configuration - From environment
+    # AI Model Configuration - MindsDB Agent-Based Architecture
+    DEFAULT_LLM_PROVIDER: str = "mindsdb"  # Using MindsDB agents exclusively
+    MINDSDB_AGENT_MODEL: str = "gpt-4"  # Model used by MindsDB agents
+
+    # Legacy Gemini configuration (deprecated - kept for backward compatibility)
     DEFAULT_GEMINI_MODEL: str = "gemini-2.0-flash"
-    DEFAULT_LLM_PROVIDER: str = "google"  # google, openai, anthropic, azure_openai
     GEMINI_ENGINE_NAME: str = "google_gemini_engine"
     GEMINI_CHAT_MODEL_NAME: str = "gemini_chat_assistant"
     GEMINI_VISION_MODEL_NAME: str = "gemini_vision_assistant"
     GEMINI_EMBEDDING_MODEL_NAME: str = "gemini_embedding_assistant"
 
-    # Feature Flags for Agent-Based Architecture
+    # Agent-Based Architecture (Mandatory for Entrust MCP Platform)
     USE_AGENT_BASED_CHAT: bool = Field(
         default=True,
         env="USE_AGENT_BASED_CHAT",
-        description="Enable agent-based chat architecture (recommended). Set to false for legacy model-based approach."
+        description="Agent-based chat is mandatory for Entrust MCP Platform"
     )
     AGENT_CHAT_ENABLE_FALLBACK: bool = Field(
-        default=True,
+        default=False,
         env="AGENT_CHAT_ENABLE_FALLBACK",
-        description="Enable fallback to direct Gemini API if agent-based chat fails"
+        description="Fallback disabled - MindsDB agents are the only supported method"
     )
     
     # Data Sharing Configuration
@@ -119,11 +122,12 @@ class Settings(BaseSettings):
     DATASET_STORAGE_PATH: str = "../storage/datasets"
     TEMPORARY_FILES_PATH: str = "../storage/temp"
     MAX_FILE_SIZE_MB: int = 100
-    ALLOWED_FILE_TYPES: str = Field(default_factory=lambda: "csv,json,xlsx,xls,txt,pdf,docx,doc,rtf,odt,jpg,jpeg,png,gif,bmp,webp")
-    
+    # MindsDB Agent-supported file types: CSV, XLSX, XLS, JSON, TXT, PDF, Parquet
+    ALLOWED_FILE_TYPES: str = Field(default_factory=lambda: "csv,xlsx,xls,json,txt,pdf,parquet")
+
     # Document Processing Configuration
     MAX_DOCUMENT_SIZE_MB: int = 50
-    SUPPORTED_DOCUMENT_TYPES: str = "pdf,docx,doc,txt,rtf,odt"
+    SUPPORTED_DOCUMENT_TYPES: str = "pdf,txt"
     
     # PDF Processing Configuration
     ENABLE_PDF_PROCESSING: bool = True
@@ -131,10 +135,10 @@ class Settings(BaseSettings):
     PDF_TEXT_EXTRACTION_MAX_PAGES: int = 10
     PDF_PROCESSING_LIBRARIES: str = "PyPDF2,PyMuPDF"  # Required libraries for PDF processing
     
-    # Image Processing Configuration
+    # Image Processing Configuration (Disabled for MindsDB Agent-based architecture)
     MAX_IMAGE_SIZE_MB: int = 25
-    SUPPORTED_IMAGE_TYPES: str = "jpg,jpeg,png,gif,bmp,webp"
-    ENABLE_IMAGE_PROCESSING: bool = True
+    SUPPORTED_IMAGE_TYPES: str = ""  # Images not supported by MindsDB agents
+    ENABLE_IMAGE_PROCESSING: bool = False
     IMAGE_THUMBNAIL_SIZE: int = 300
     
     # Data Connector Configuration

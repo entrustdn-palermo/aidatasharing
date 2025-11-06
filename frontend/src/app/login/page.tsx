@@ -214,7 +214,7 @@ export default function LoginPage() {
               Welcome Back
             </CardTitle>
             <CardDescription className="text-gray-600">
-              Sign in to your AI Share Platform account
+              Sign in to your Entrust Data Sharing MCP Platform account
             </CardDescription>
           </CardHeader>
 
@@ -364,7 +364,7 @@ export default function LoginPage() {
         {/* Footer */}
         <div className="text-center mt-8">
           <p className="text-sm text-gray-500">
-            Powered by AI Share Platform
+            Powered by Entrust Data Sharing MCP Platform
           </p>
         </div>
       </div>

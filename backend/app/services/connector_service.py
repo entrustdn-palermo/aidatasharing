@@ -719,33 +719,33 @@ class ConnectorService:
             }
     
     async def _create_document_chat_model(self, dataset: Dataset, text_content: str) -> Dict[str, Any]:
-        """Create MindsDB model for document chat"""
+        """Create MindsDB agent for document chat (agent-based architecture)"""
         try:
-            model_name = f"doc_chat_{dataset.id}"
-            
-            # Create a simple chat model for the document
-            result = self.mindsdb_service.create_gemini_model(
-                model_name=model_name,
-                model_type="chat",
-                column_name="question"
-            )
-            
-            if result.get("status") in ["created", "exists"]:
-                # Update dataset with model information
-                dataset.chat_model_name = model_name
+            # Use agent-based approach instead of model creation
+            logger.info(f"Setting up agent for document chat on dataset {dataset.id}")
+
+            # Create agent for single-file dataset
+            if dataset.is_multi_file_dataset:
+                result = self.mindsdb_service.setup_multi_file_agent(dataset, self.db)
+            else:
+                result = self.mindsdb_service.setup_single_file_agent(dataset, self.db)
+
+            if result.get("success"):
+                # Update dataset with agent information
+                dataset.agent_name = result.get("agent_name")
                 dataset.ai_chat_enabled = True
                 dataset.chat_context = {
                     "document_content": text_content[:2000],  # First 2000 chars for context
-                    "model_name": model_name,
+                    "agent_name": result.get("agent_name"),
                     "created_at": datetime.utcnow().isoformat()
                 }
                 self.db.commit()
-                
-                logger.info(f"✅ Created document chat model: {model_name}")
-                return {"success": True, "model_name": model_name}
-            
-            return {"success": False, "error": "Model creation failed"}
-            
+
+                logger.info(f"✅ Created document chat agent: {result.get('agent_name')}")
+                return {"success": True, "agent_name": result.get("agent_name")}
+
+            return {"success": False, "error": result.get("error", "Agent creation failed")}
+
         except Exception as e:
             logger.error(f"❌ Failed to create document chat model: {e}")
             return {"success": False, "error": str(e)}

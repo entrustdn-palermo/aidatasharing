@@ -1,5 +1,5 @@
 /**
- * Unified API Client for AI Share Platform
+ * Unified API Client for Entrust Data Sharing MCP Platform
  * Provides a simplified interface for API interactions
  */
 

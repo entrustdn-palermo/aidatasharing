@@ -246,16 +246,20 @@ function DatasetDetailContent() {
         password: shareForm.password || undefined,
         enable_chat: shareForm.enable_chat
       });
-      
+
       setShowCreateShareModal(false);
       setShareForm({
         password: '',
         enable_chat: true
       });
-      
-      // Refresh dataset and share links
+
+      // Force refresh dataset and share links with a small delay to ensure backend updates
+      await new Promise(resolve => setTimeout(resolve, 300));
       await Promise.all([fetchDataset(), fetchSharedLinks()]);
-      
+
+      // Show success message
+      alert('✓ Share link created successfully!');
+
     } catch (error: any) {
       console.error('Failed to create share link:', error);
       alert(error.response?.data?.detail || 'Failed to create share link');
@@ -265,13 +269,20 @@ function DatasetDetailContent() {
   };
 
   const handleDisableSharing = async () => {
-    if (!confirm('Are you sure you want to disable sharing for this dataset? This will invalidate all existing share links.')) {
+    if (!confirm('Are you sure you want to stop sharing? This will invalidate the share link.')) {
       return;
     }
 
     try {
       await dataSharingAPI.disableSharing(datasetId);
+
+      // Force refresh with a small delay to ensure backend updates
+      await new Promise(resolve => setTimeout(resolve, 300));
       await Promise.all([fetchDataset(), fetchSharedLinks()]);
+
+      // Show success message
+      alert('✓ Sharing disabled successfully');
+
     } catch (error: any) {
       console.error('Failed to disable sharing:', error);
       alert(error.response?.data?.detail || 'Failed to disable sharing');
@@ -440,16 +451,106 @@ function DatasetDetailContent() {
     setShowRenameModal(true);
   };
 
-  const handleDownload = async (format = 'original') => {
+  const handleDownloadAll = async () => {
     try {
       setIsLoading(true);
-      
+
       const token = localStorage.getItem('access_token');
       if (!token) {
         alert('Authentication required. Please log in again.');
         return;
       }
-      
+
+      // Direct download for multi-file datasets (ZIP) or single file
+      const downloadUrl = `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/datasets/${datasetId}/download-all`;
+
+      const response = await fetch(downloadUrl, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+
+        // Get filename from Content-Disposition header or use default
+        const contentDisposition = response.headers.get('Content-Disposition');
+        let filename = 'download';
+        if (contentDisposition) {
+          const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+          if (filenameMatch) {
+            filename = filenameMatch[1];
+          }
+        }
+
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+      } else {
+        const errorData = await response.json();
+        alert(`Download failed: ${errorData.detail || 'Unknown error'}`);
+      }
+    } catch (err: any) {
+      console.error('Download error:', err);
+      alert(`Failed to download: ${err.message}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleDownloadFile = async (fileId: number, filename: string) => {
+    try {
+      const token = localStorage.getItem('access_token');
+      if (!token) {
+        alert('Authentication required. Please log in again.');
+        return;
+      }
+
+      const downloadUrl = `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/datasets/${datasetId}/files/${fileId}/download`;
+
+      const response = await fetch(downloadUrl, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+      } else {
+        const errorData = await response.json();
+        alert(`Download failed: ${errorData.detail || 'Unknown error'}`);
+      }
+    } catch (err: any) {
+      console.error('Download error:', err);
+      alert(`Failed to download: ${err.message}`);
+    }
+  };
+
+  const handleDownload = async (format = 'original') => {
+    try {
+      setIsLoading(true);
+
+      const token = localStorage.getItem('access_token');
+      if (!token) {
+        alert('Authentication required. Please log in again.');
+        return;
+      }
+
       // Step 1: Get download token from the backend
       const tokenResponse = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/datasets/${datasetId}/download`, {
         method: 'GET',
@@ -625,12 +726,13 @@ function DatasetDetailContent() {
             <div className="flex space-x-3">
               {/* Only show download for uploaded file datasets, not connector datasets */}
               {dataset.source_url && !dataset.connector_id && (
-                <button 
-                  onClick={() => handleDownload('original')}
+                <button
+                  onClick={handleDownloadAll}
                   className="flex items-center bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-md text-sm font-medium"
+                  disabled={isLoading}
                 >
                   <Download className="w-4 h-4 mr-2" />
-                  Download ({dataset?.type?.toUpperCase()})
+                  {dataset.is_multi_file ? `Download All (${dataset.total_files_count} files)` : `Download (${dataset?.type?.toUpperCase()})`}
                 </button>
               )}
               {isOwner && (
@@ -1159,6 +1261,60 @@ function DatasetDetailContent() {
               )}
             </div>
 
+            {/* Multi-file Dataset Files Section */}
+            {dataset.is_multi_file && dataset.files && dataset.files.length > 0 && (
+              <div className="bg-white shadow rounded-lg p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-medium text-gray-900">
+                    Dataset Files ({dataset.files.length})
+                  </h3>
+                  <button
+                    onClick={handleDownloadAll}
+                    className="flex items-center bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-md text-sm font-medium"
+                    disabled={isLoading}
+                  >
+                    <Download className="w-4 h-4 mr-2" />
+                    Download All as ZIP
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  {dataset.files.map((file: any) => (
+                    <div
+                      key={file.id}
+                      className="flex items-center justify-between p-3 border border-gray-200 rounded-lg hover:bg-gray-50"
+                    >
+                      <div className="flex items-center flex-1 min-w-0">
+                        <FileText className="w-5 h-5 text-blue-600 mr-3 flex-shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-gray-900 truncate">
+                            {file.filename}
+                          </p>
+                          <div className="flex items-center gap-3 mt-1">
+                            <p className="text-xs text-gray-500">
+                              {formatFileSize(file.file_size || 0)}
+                            </p>
+                            {file.file_type && (
+                              <span className="text-xs text-gray-400 uppercase">
+                                {file.file_type}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => handleDownloadFile(file.id, file.filename)}
+                        className="ml-4 flex items-center bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md text-sm font-medium flex-shrink-0"
+                      >
+                        <Download className="w-4 h-4 mr-1" />
+                        Download
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Document Preview (for document datasets) */}
             {dataset.document_type && (
               <div className="bg-white shadow rounded-lg p-6">
@@ -1277,78 +1433,92 @@ function DatasetDetailContent() {
 
           {/* Sidebar */}
           <div className="lg:col-span-1">
-            {/* Sharing Management */}
+            {/* Sharing Management - Simplified */}
             {isOwner && (
               <div className="bg-white shadow rounded-lg p-6 mb-6">
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="text-lg font-medium text-gray-900">Data Sharing</h3>
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-lg font-medium text-gray-900">Share Dataset</h3>
                   {dataset.public_share_enabled && (
-                    <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                      <div className="w-1.5 h-1.5 bg-green-400 rounded-full mr-1"></div>
-                      Active
+                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                      <div className="w-2 h-2 bg-green-500 rounded-full mr-1.5 animate-pulse"></div>
+                      Shared
                     </span>
                   )}
                 </div>
 
                 {dataset.public_share_enabled ? (
-                  <div className="space-y-4">
-                    <div className="bg-green-50 border border-green-200 rounded-md p-3">
-                      <div className="flex items-center">
-                        <Shield className="h-4 w-4 text-green-600 mr-2" />
-                        <span className="text-sm font-medium text-green-800">Sharing is enabled</span>
-                      </div>
-                      {dataset.share_token && (
-                        <div className="mt-2">
-                          <div className="flex items-center space-x-2">
-                            <input
-                              type="text"
-                              value={`${window.location.origin}/shared/${dataset.share_token}`}
-                              readOnly
-                              className="flex-1 text-xs bg-white border border-green-300 rounded px-2 py-1"
-                            />
-                            <button
-                              onClick={() => copyShareLink(dataset.share_token)}
-                              className="text-green-600 hover:text-green-800"
-                            >
-                              <Copy className="h-4 w-4" />
-                            </button>
-                            <button
-                              onClick={() => window.open(`/shared/${dataset.share_token}`, '_blank')}
-                              className="text-green-600 hover:text-green-800"
-                            >
-                              <ExternalLink className="h-4 w-4" />
-                            </button>
-                          </div>
+                  <div className="space-y-3">
+                    {/* Share Link Display */}
+                    {dataset.share_token && (
+                      <div className="bg-gradient-to-r from-green-50 to-blue-50 border border-green-200 rounded-lg p-3">
+                        <div className="flex items-center mb-2">
+                          <Shield className="h-4 w-4 text-green-600 mr-2" />
+                          <span className="text-xs font-semibold text-green-900">Public Link Active</span>
                         </div>
-                      )}
-                    </div>
+                        <div className="flex items-center space-x-2 mb-2">
+                          <input
+                            type="text"
+                            value={`${window.location.origin}/shared/${dataset.share_token}`}
+                            readOnly
+                            className="flex-1 text-xs bg-white border border-green-300 rounded px-3 py-1.5 font-mono"
+                            onClick={(e) => e.currentTarget.select()}
+                          />
+                          <button
+                            onClick={() => copyShareLink(dataset.share_token)}
+                            className="p-1.5 text-green-700 hover:bg-green-100 rounded transition-colors"
+                            title="Copy link"
+                          >
+                            <Copy className="h-4 w-4" />
+                          </button>
+                          <button
+                            onClick={() => window.open(`/shared/${dataset.share_token}`, '_blank')}
+                            className="p-1.5 text-blue-700 hover:bg-blue-100 rounded transition-colors"
+                            title="Open in new tab"
+                          >
+                            <ExternalLink className="h-4 w-4" />
+                          </button>
+                        </div>
+                        {dataset.share_view_count > 0 && (
+                          <div className="text-xs text-green-700 flex items-center">
+                            <Eye className="w-3 h-3 mr-1" />
+                            {dataset.share_view_count} {dataset.share_view_count === 1 ? 'view' : 'views'}
+                          </div>
+                        )}
+                      </div>
+                    )}
 
-                    <div className="flex space-x-2">
+                    {/* Quick Actions */}
+                    <div className="flex gap-2">
                       <button
                         onClick={handleDisableSharing}
-                        className="flex-1 flex items-center justify-center px-3 py-2 border border-red-300 text-red-700 rounded-md hover:bg-red-50 text-sm"
+                        className="flex-1 flex items-center justify-center px-3 py-2 border border-red-300 text-red-700 rounded-md hover:bg-red-50 text-sm font-medium transition-colors"
                       >
-                        <PowerOff className="w-4 h-4 mr-1" />
-                        Disable
+                        <PowerOff className="w-4 h-4 mr-1.5" />
+                        Stop Sharing
                       </button>
                     </div>
 
-
-                    {dataset.share_view_count > 0 && (
-                      <div className="text-xs text-gray-500 flex items-center">
-                        <Eye className="w-3 h-3 mr-1" />
-                        Views: {dataset.share_view_count}
-                      </div>
-                    )}
+                    {/* Info */}
+                    <p className="text-xs text-gray-500 mt-2">
+                      Anyone with this link can view and chat with your dataset.
+                    </p>
                   </div>
                 ) : (
-                  <div className="space-y-4">
-                    <p className="text-sm text-gray-600">
-                      Create a shareable link to allow others to access and chat with this dataset.
-                    </p>
+                  <div className="space-y-3">
+                    <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                      <p className="text-sm text-gray-700 mb-2">
+                        <span className="font-medium">Share this dataset</span> to allow others to view and chat with the data.
+                      </p>
+                      <ul className="text-xs text-gray-600 space-y-1 ml-4 list-disc">
+                        <li>Generate a secure share link</li>
+                        <li>Enable AI-powered chat for viewers</li>
+                        <li>Optional password protection</li>
+                        <li>Track views and access</li>
+                      </ul>
+                    </div>
                     <button
                       onClick={() => setShowCreateShareModal(true)}
-                      className="w-full flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
+                      className="w-full flex items-center justify-center px-4 py-2.5 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 transition-colors shadow-sm"
                     >
                       <Share2 className="w-4 h-4 mr-2" />
                       Create Share Link
@@ -1364,14 +1534,21 @@ function DatasetDetailContent() {
               <div className="space-y-3">
                 {/* Only show download for uploaded file datasets, not connector datasets */}
                 {dataset.source_url && !dataset.connector_id && (
-                  <button 
-                    onClick={() => handleDownload('original')}
+                  <button
+                    onClick={handleDownloadAll}
                     className="w-full flex items-center p-3 border border-gray-200 rounded-lg hover:bg-gray-50"
+                    disabled={isLoading}
                   >
                     <Download className="w-5 h-5 text-green-600 mr-3" />
                     <div className="text-left">
-                      <p className="text-sm font-medium text-gray-900">Download Dataset</p>
-                      <p className="text-xs text-gray-500">Download in original format ({dataset?.type?.toUpperCase()})</p>
+                      <p className="text-sm font-medium text-gray-900">
+                        {dataset.is_multi_file ? 'Download All Files' : 'Download Dataset'}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        {dataset.is_multi_file
+                          ? `Download ${dataset.total_files_count} files as ZIP`
+                          : `Download in original format (${dataset?.type?.toUpperCase()})`}
+                      </p>
                     </div>
                   </button>
                 )}
@@ -1428,56 +1605,82 @@ function DatasetDetailContent() {
           </div>
         </div>
 
-        {/* Create Share Link Modal */}
+        {/* Create Share Link Modal - Simplified */}
         {showCreateShareModal && (
-          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 flex items-center justify-center">
-            <div className="relative mx-auto p-5 border w-96 shadow-lg rounded-md bg-white max-h-[90vh] overflow-y-auto">
-              <div className="mt-3">
-                <h3 className="text-lg font-medium text-gray-900 mb-4">Create Share Link</h3>
-                
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Password (optional)
-                    </label>
-                    <input
-                      type="password"
-                      value={shareForm.password}
-                      onChange={(e) => setShareForm({...shareForm, password: e.target.value})}
-                      placeholder="Optional password protection"
-                      className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    />
-                  </div>
+          <div className="fixed inset-0 bg-black bg-opacity-50 overflow-y-auto h-full w-full z-50 flex items-center justify-center p-4">
+            <div className="relative mx-auto w-full max-w-md bg-white rounded-lg shadow-xl">
+              {/* Header */}
+              <div className="px-6 py-4 border-b border-gray-200">
+                <h3 className="text-lg font-semibold text-gray-900">Share Dataset</h3>
+                <p className="text-sm text-gray-600 mt-1">Create a secure link for others to access this dataset</p>
+              </div>
 
-                  <div className="flex items-center">
+              {/* Body */}
+              <div className="px-6 py-4 space-y-4">
+                {/* Enable Chat Option */}
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                  <div className="flex items-start">
                     <input
                       type="checkbox"
                       id="enable_chat"
                       checked={shareForm.enable_chat}
                       onChange={(e) => setShareForm({...shareForm, enable_chat: e.target.checked})}
-                      className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                      className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded mt-0.5"
                     />
-                    <label htmlFor="enable_chat" className="ml-2 block text-sm text-gray-900">
-                      Enable AI chat for shared dataset
-                    </label>
+                    <div className="ml-3">
+                      <label htmlFor="enable_chat" className="block text-sm font-medium text-gray-900 cursor-pointer">
+                        Enable AI Chat
+                      </label>
+                      <p className="text-xs text-gray-600 mt-1">
+                        Allow viewers to ask questions and get insights from the data using AI
+                      </p>
+                    </div>
                   </div>
                 </div>
 
-                <div className="flex space-x-3 mt-6">
-                  <button
-                    onClick={() => setShowCreateShareModal(false)}
-                    className="flex-1 px-4 py-2 text-sm font-medium text-gray-700 bg-gray-200 border border-gray-300 rounded-md hover:bg-gray-300"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleCreateShareLink}
-                    disabled={isCreatingShare}
-                    className="flex-1 px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-md hover:bg-blue-700 disabled:opacity-50"
-                  >
-                    {isCreatingShare ? 'Creating...' : 'Create Link'}
-                  </button>
+                {/* Password Protection (Optional) */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Password Protection <span className="text-gray-400 font-normal">(optional)</span>
+                  </label>
+                  <input
+                    type="password"
+                    value={shareForm.password}
+                    onChange={(e) => setShareForm({...shareForm, password: e.target.value})}
+                    placeholder="Leave blank for public access"
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Add a password to restrict access to the share link
+                  </p>
                 </div>
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 py-4 bg-gray-50 border-t border-gray-200 rounded-b-lg flex justify-end space-x-3">
+                <button
+                  onClick={() => setShowCreateShareModal(false)}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleCreateShareLink}
+                  disabled={isCreatingShare}
+                  className="px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {isCreatingShare ? (
+                    <span className="flex items-center">
+                      <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Creating...
+                    </span>
+                  ) : (
+                    'Create Share Link'
+                  )}
+                </button>
               </div>
             </div>
           </div>

@@ -1,6 +1,14 @@
-# AI Share Platform
+# Entrust Data Sharing MCP Platform
 
-A comprehensive AI-powered data sharing platform that enables organizations to securely share, analyze, and build machine learning models on their data.
+An enterprise-grade data sharing platform powered by MindsDB agents that enables organizations to securely share, analyze, and interact with data using AI-driven insights.
+
+## Architecture: Agent-Based Methodology
+
+The platform has evolved from direct LLM API usage to a **MindsDB agent-based architecture**, providing:
+- **Better performance** with structured data interactions
+- **Multi-file dataset support** through MindsDB agents
+- **Standardized file types** optimized for agent processing
+- **Scalable AI interactions** without direct API management
 
 ## 🚀 Quick Start
 
@@ -28,11 +36,12 @@ python setup_fresh_install.py
 
 ## ✨ Key Features
 
-### 📊 Dataset Management
-- **Multiple Formats**: CSV, JSON, Excel, PDF, DOCX, DOC, TXT, RTF, ODT
-- **Document Processing**: Automatic text extraction and analysis
+### 📊 Dataset Management (Agent-Optimized)
+- **Supported Formats**: CSV, XLSX, XLS, JSON, TXT, PDF, Parquet
+- **Agent-Based Processing**: MindsDB agents handle all data interactions
 - **Schema Detection**: Automatic data structure analysis
 - **Preview Generation**: Smart data previews and summaries
+- **Multi-File Support**: Process multiple files as a single dataset
 
 ### 🔗 Data Connectors
 - **Databases**: MySQL, PostgreSQL, MongoDB, Snowflake, BigQuery, Redshift, ClickHouse
@@ -40,11 +49,12 @@ python setup_fresh_install.py
 - **API Sources**: REST API data connectors
 - **File Systems**: Local and network file system access
 
-### 🤖 AI Integration
-- **MindsDB**: Advanced ML model creation and management
-- **Google Gemini**: Natural language processing and chat
-- **Document Chat**: AI-powered document Q&A
+### 🤖 AI Integration (Agent-Based Architecture)
+- **MindsDB Agents**: Primary AI interaction layer (mandatory)
+- **Multi-Model Support**: Agents can use GPT-4, Gemini, or other LLMs
+- **Dataset Chat**: AI-powered Q&A through MindsDB agents
 - **Data Insights**: Automated analysis and recommendations
+- **No Direct LLM Calls**: All AI interactions through agent framework
 
 ### 🔐 Security & Sharing
 - **Organization Scoping**: Multi-tenant data isolation
@@ -171,11 +181,12 @@ Key configuration categories:
 All environment variables are managed through the unified `.env` file and can be configured via the admin panel:
 
 - **DATABASE_URL**: SQLite database path (unified storage)
-- **GOOGLE_API_KEY**: Google AI API key for Gemini integration
-- **MINDSDB_URL**: MindsDB server URL
+- **GOOGLE_API_KEY**: API key for LLM (used by MindsDB agents)
+- **MINDSDB_URL**: MindsDB server URL (required)
 - **SECRET_KEY**: JWT signing secret
 - **MAX_FILE_SIZE_MB**: Maximum file upload size
-- **ALLOWED_FILE_TYPES**: Supported file formats
+- **ALLOWED_FILE_TYPES**: CSV, XLSX, XLS, JSON, TXT, PDF, Parquet
+- **USE_AGENT_BASED_CHAT**: Must be true (agent-based is mandatory)
 
 ### Admin Panel Management
 Access environment settings through:
@@ -264,6 +275,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-**AI Share Platform** - Empowering organizations with intelligent data sharing and AI-driven insights.
+**Entrust Data Sharing MCP Platform** - Empowering organizations with secure data sharing and AI-driven insights through MindsDB agents.
 
-*Built with ❤️ using FastAPI, Next.js, SQLite, and modern AI technologies.*
+*Built with ❤️ using FastAPI, Next.js, PostgreSQL, MindsDB Agent Architecture, and enterprise-grade AI technologies.*

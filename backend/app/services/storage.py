@@ -466,7 +466,11 @@ class StorageService:
     async def get_file_stream(self, file_path: str) -> StreamingResponse:
         """Get file as streaming response using the configured backend"""
         return await self.backend.get_file_stream(file_path)
-    
+
+    async def get_file_content(self, file_path: str) -> bytes:
+        """Get file content as bytes (for ZIP creation and other operations)"""
+        return await self.backend.retrieve_file(file_path)
+
     def get_file_url(self, file_path: str, expires_in: int = 3600) -> Optional[str]:
         """Get temporary URL for file access (if supported by backend)"""
         return self.backend.get_file_url(file_path, expires_in)

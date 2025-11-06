@@ -661,7 +661,7 @@ async def chat_with_shared_dataset(
         from app.core.config import settings
         if getattr(settings, 'USE_AGENT_BASED_CHAT', True):
             # Use new agent-based architecture
-            chat_response = mindsdb_service.chat_with_dataset_agent(
+            chat_response = await mindsdb_service.chat_with_dataset_agent(
                 dataset_id=dataset.id,
                 message=chat_request.message,
                 db=db,
@@ -670,7 +670,7 @@ async def chat_with_shared_dataset(
             )
         else:
             # Fallback to legacy model-based chat
-            chat_response = mindsdb_service.chat_with_dataset(
+            chat_response = await mindsdb_service.chat_with_dataset(
                 dataset_id=str(dataset.id),
                 message=chat_request.message,
                 user_id=None,  # Anonymous user

@@ -28,7 +28,7 @@ export default function Home() {
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 via-white to-purple-50">
         <div className="flex flex-col items-center space-y-4">
           <div className="h-12 w-12 animate-spin rounded-full border-4 border-blue-200 border-t-blue-600"></div>
-          <p className="text-gray-600 animate-pulse">Loading AI Share Platform...</p>
+          <p className="text-gray-600 animate-pulse">Loading Entrust MCP Platform...</p>
         </div>
       </div>
     );
@@ -58,20 +58,20 @@ export default function Home() {
             {/* Hero Badge */}
             <div className="inline-flex items-center rounded-full bg-blue-100 px-4 py-2 text-sm font-medium text-blue-700 mb-8">
               <span className="mr-2">🚀</span>
-              Powered by MindsDB & AI
+              Powered by MindsDB Agents
             </div>
 
             {/* Main Heading */}
             <h1 className="text-4xl sm:text-6xl font-bold text-gray-900 mb-6 leading-tight">
-              <span className="text-gradient">AI Share Platform</span>
+              <span className="text-gradient">Entrust Data Sharing</span>
               <br />
-              <span className="text-gray-700">Made Simple</span>
+              <span className="text-gray-700">MCP Platform</span>
             </h1>
 
             {/* Subtitle */}
             <p className="text-xl text-gray-600 mb-8 max-w-3xl mx-auto leading-relaxed">
-              The most intuitive AI-driven data sharing platform. Create, manage, and deploy 
-              machine learning models with unprecedented ease and speed.
+              Enterprise-grade data sharing platform powered by MindsDB agents.
+              Securely share and interact with your data using AI-driven insights.
             </p>
             
             {/* CTA Buttons */}
@@ -79,7 +79,7 @@ export default function Home() {
               <Link href="/login">
                 <Button variant="gradient" size="lg" className="w-full sm:w-auto">
                   <span className="mr-2">✨</span>
-                  Get Started Free
+                  Get Started
                 </Button>
               </Link>
               <Link href="/register">
@@ -114,7 +114,7 @@ export default function Home() {
         <div className="container mx-auto px-4">
           <div className="text-center mb-16">
             <h2 className="text-3xl font-bold text-gray-900 mb-4">
-              Why Choose AI Share Platform?
+              Why Choose Entrust Data Sharing MCP Platform?
             </h2>
             <p className="text-lg text-gray-600 max-w-2xl mx-auto">
               Built for modern teams who need powerful AI capabilities without the complexity.
@@ -170,47 +170,22 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Stats Section */}
-      <div className="py-16 bg-gradient-to-r from-blue-600 to-purple-600">
-        <div className="container mx-auto px-4">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-8 text-center text-white">
-            <div className="animate-fade-in">
-              <div className="text-3xl font-bold mb-2">10x</div>
-              <div className="text-blue-100">Faster Deployment</div>
-            </div>
-            <div className="animate-fade-in" style={{ animationDelay: '0.1s' }}>
-              <div className="text-3xl font-bold mb-2">99.9%</div>
-              <div className="text-blue-100">Uptime SLA</div>
-            </div>
-            <div className="animate-fade-in" style={{ animationDelay: '0.2s' }}>
-              <div className="text-3xl font-bold mb-2">500+</div>
-              <div className="text-blue-100">Data Connectors</div>
-            </div>
-            <div className="animate-fade-in" style={{ animationDelay: '0.3s' }}>
-              <div className="text-3xl font-bold mb-2">24/7</div>
-              <div className="text-blue-100">Expert Support</div>
-            </div>
-          </div>
-        </div>
-      </div>
-
       {/* CTA Section */}
       <div className="py-16 bg-gray-50">
         <div className="container mx-auto px-4 text-center">
           <Card variant="elevated" className="max-w-4xl mx-auto">
             <CardContent className="p-12">
               <h2 className="text-3xl font-bold text-gray-900 mb-4">
-                Ready to Transform Your Data Workflow?
+                Ready to Get Started?
               </h2>
               <p className="text-lg text-gray-600 mb-8 max-w-2xl mx-auto">
-                Join thousands of teams who have already revolutionized their AI and data operations 
-                with our platform.
+                Start sharing and analyzing your data with AI-powered insights.
               </p>
               <div className="flex flex-col sm:flex-row gap-4 justify-center">
                 <Link href="/register">
                   <Button variant="gradient" size="lg" className="w-full sm:w-auto">
                     <span className="mr-2">🚀</span>
-                    Start Free Trial
+                    Get Started
                   </Button>
                 </Link>
                 <Link href="/login">
@@ -220,25 +195,45 @@ export default function Home() {
                   </Button>
                 </Link>
               </div>
-              <p className="text-sm text-gray-500 mt-4">
-                No credit card required • 14-day free trial • Cancel anytime
-              </p>
             </CardContent>
           </Card>
         </div>
       </div>
 
       {/* Footer */}
-      <footer className="bg-gray-900 text-white py-8">
-        <div className="container mx-auto px-4 text-center">
-          <div className="flex justify-center items-center mb-4">
-            <h3 className="text-xl font-bold">AI Share Platform</h3>
+      <footer className="bg-gray-900 text-white py-12">
+        <div className="container mx-auto px-4">
+          <div className="text-center mb-8">
+            <h3 className="text-xl font-bold mb-2">Entrust Data Sharing MCP Platform</h3>
+            <p className="text-gray-400 mb-4">
+              Empowering organizations with intelligent data sharing and AI-driven insights.
+            </p>
           </div>
-          <p className="text-gray-400 mb-4">
-            Empowering organizations with intelligent data sharing and AI-driven insights.
-          </p>
-          <div className="text-sm text-gray-500">
-            Built with ❤️ using FastAPI, Next.js, and modern AI technologies.
+
+          {/* Academic Credits */}
+          <div className="max-w-2xl mx-auto bg-gray-800 rounded-lg p-6 mb-6">
+            <h4 className="text-lg font-semibold mb-4 text-blue-400">Academic Project</h4>
+            <div className="space-y-3 text-sm">
+              <div className="flex items-start">
+                <span className="text-gray-400 min-w-[100px]">Developed by:</span>
+                <span className="text-white">Nur Arifin Akbar</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-gray-400 min-w-[100px]">Institution:</span>
+                <span className="text-white">UNIPA (Università degli Studi di Palermo)</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-gray-400 min-w-[100px]">Supervisors:</span>
+                <div className="text-white">
+                  <div>Prof. Biagio Lenzitti</div>
+                  <div>Prof. Domenico Tegolo</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="text-center text-sm text-gray-500">
+            Built with FastAPI, Next.js, MindsDB, and PostgreSQL
           </div>
         </div>
       </footer>

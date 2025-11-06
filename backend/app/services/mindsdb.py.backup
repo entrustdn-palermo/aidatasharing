@@ -38,17 +38,6 @@ logger = logging.getLogger(__name__)
 
 
 class MindsDBService:
-    # Supported file extensions for MindsDB agents
-    SUPPORTED_FILE_EXTENSIONS = {
-        '.csv': 'csv',
-        '.json': 'json',
-        '.xlsx': 'excel',
-        '.xls': 'excel',
-        '.parquet': 'parquet',
-        '.txt': 'text',
-        '.pdf': 'pdf'
-    }
-
     def __init__(self):
         """
         Initialize MindsDB Service for Entrust MCP Platform.
@@ -216,8 +205,404 @@ class MindsDBService:
                 "error": str(e)
             }
 
+    def create_gemini_engine(self) -> Dict[str, Any]:
+        """
+        [DEPRECATED] Create or verify Google Gemini engine using raw SQL.
 
+        This method is deprecated in favor of agent-based architecture.
+        MindsDB agents manage their own engine configuration.
 
+        Returns:
+            Dict with deprecation warning
+        """
+        logger.warning("⚠️ DEPRECATED: create_gemini_engine() is deprecated in agent-based architecture")
+        logger.warning("   Agents manage their own engine configuration through MindsDB")
+        try:
+            if not self._ensure_connection():
+                return {"message": "SDK connection not available", "status": "error"}
+
+            # Check if engine already exists first
+            try:
+                engines_query = "SHOW ML_ENGINES"
+                result = self.connection.query(engines_query)
+                engines_df = result.fetch()
+                
+                if not engines_df.empty:
+                    for _, engine in engines_df.iterrows():
+                        if engine.get('NAME') == self.engine_name:
+                            logger.info(f"✅ Engine {self.engine_name} already exists")
+                            return {
+                                "message": f"Engine {self.engine_name} ready",
+                                "status": "exists",
+                                "engine_name": self.engine_name
+                            }
+            except Exception as e:
+                logger.warning(f"⚠️ Could not check existing engines: {e}")
+
+            # Try to use OpenAI as fallback since Gemini engine creation seems to have issues
+            logger.warning(f"⚠️ Gemini engine creation having issues, trying OpenAI as fallback")
+            
+            # Check if we have OpenAI API key as fallback
+            openai_key = getattr(settings, 'OPENAI_API_KEY', None)
+            if not openai_key:
+                import os
+                openai_key = os.environ.get('OPENAI_API_KEY')
+            
+            if openai_key:
+                # Try creating OpenAI engine as fallback
+                openai_engine_name = "openai_engine_fallback"
+                create_openai_engine_sql = f"""
+                CREATE ML_ENGINE {openai_engine_name}
+                FROM openai
+                USING
+                    api_key = '{openai_key}';
+                """
+                
+                try:
+                    logger.info(f"🔧 Creating OpenAI fallback engine: {openai_engine_name}")
+                    self.connection.query(create_openai_engine_sql)
+                    
+                    # Wait and verify
+                    import time
+                    time.sleep(3)
+                    
+                    result = self.connection.query("SHOW ML_ENGINES")
+                    engines_df = result.fetch()
+                    
+                    for _, engine in engines_df.iterrows():
+                        if engine.get('NAME') == openai_engine_name:
+                            logger.info(f"✅ OpenAI fallback engine created successfully")
+                            # Update the engine name for this session
+                            self.engine_name = openai_engine_name
+                            return {
+                                "message": f"OpenAI fallback engine {openai_engine_name} created",
+                                "status": "created",
+                                "engine_name": openai_engine_name
+                            }
+                            
+                except Exception as openai_error:
+                    logger.warning(f"⚠️ OpenAI fallback also failed: {openai_error}")
+            
+            # If all else fails, try the original Gemini approach one more time
+            logger.info(f"🔧 Attempting Gemini engine creation one more time")
+            create_engine_sql = f"""
+            CREATE ML_ENGINE {self.engine_name}
+            FROM google_gemini
+            USING
+                api_key = '{self.api_key}';
+            """
+            
+            try:
+                logger.info(f"🔧 Creating engine with SQL: {create_engine_sql}")
+                self.connection.query(create_engine_sql)
+                
+                # Just return success even if we can't verify it
+                # The model creation will test if it actually works
+                logger.info(f"✅ Engine creation command executed")
+                return {
+                    "message": f"Engine {self.engine_name} creation attempted",
+                    "status": "created",
+                    "engine_name": self.engine_name
+                }
+                    
+            except Exception as e:
+                if "already exists" in str(e).lower():
+                    logger.info(f"✅ Engine {self.engine_name} already exists")
+                    return {
+                        "message": f"Engine {self.engine_name} ready",
+                        "status": "exists",
+                        "engine_name": self.engine_name
+                    }
+                else:
+                    raise e
+                    
+        except Exception as e:
+            logger.error(f"❌ Failed to create/verify engine {self.engine_name}: {e}")
+            return {
+                "message": f"Engine creation failed: {str(e)}",
+                "status": "error",
+                "engine_name": self.engine_name
+            }
+
+    def create_gemini_model(
+        self,
+        model_name: str,
+        model_type: str = "chat",
+        column_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        [DEPRECATED] Create a Gemini model using raw SQL.
+
+        This method is deprecated in favor of agent-based architecture.
+        Use setup_single_file_agent() or setup_multi_file_agent() instead.
+
+        Returns:
+            Dict with deprecation warning
+        """
+        logger.warning("⚠️ DEPRECATED: create_gemini_model() is deprecated in agent-based architecture")
+        logger.warning("   Use setup_single_file_agent() or setup_multi_file_agent() instead")
+        try:
+            if not self._ensure_connection():
+                return {"message": "SDK connection not available", "status": "error"}
+
+            # Ensure engine exists first
+            engine_result = self.create_gemini_engine()
+            if engine_result.get("status") == "error":
+                return {"message": "Engine creation failed", "status": "error"}
+
+            # Check if model already exists
+            try:
+                models_query = "SHOW MODELS"
+                result = self.connection.query(models_query)
+                models_df = result.fetch()
+                
+                if not models_df.empty:
+                    for _, model in models_df.iterrows():
+                        if model.get('NAME') == model_name:
+                            model_status = model.get('STATUS', 'Unknown')
+                            logger.info(f"✅ Model {model_name} already exists (Status: {model_status})")
+                            return {
+                                "message": f"Model {model_name} ready",
+                                "status": "exists",
+                                "model_name": model_name
+                            }
+            except Exception as e:
+                logger.warning(f"⚠️ Could not check existing models: {e}")
+
+            # Set default column name
+            if not column_name:
+                column_name = "question"
+
+            # Determine which engine to use and appropriate model syntax
+            engine_name = self.engine_name
+            model_sql = ""
+            
+            if "openai" in engine_name.lower():
+                # OpenAI model syntax
+                model_sql = f"""
+                CREATE MODEL {model_name}
+                PREDICT response
+                USING
+                    engine = '{engine_name}',
+                    model_name = 'gpt-3.5-turbo',
+                    prompt_template = 'Answer the following question: {{{{question}}}}';
+                """
+            else:
+                # Gemini model syntax
+                model_sql = f"""
+                CREATE MODEL {model_name}
+                PREDICT response
+                USING
+                    engine = '{engine_name}',
+                    model_name = '{self.default_model}',
+                    prompt_template = 'Answer the following question: {{{{question}}}}';
+                """
+            
+            try:
+                logger.info(f"🤖 Creating model with SQL: {model_sql}")
+                self.connection.query(model_sql)
+                
+                # Wait for model to initialize
+                import time
+                logger.info(f"⏳ Waiting for model {model_name} to initialize...")
+                time.sleep(8)  # Increased wait time
+                
+                # Verify model was created and check its status
+                result = self.connection.query("SHOW MODELS")
+                models_df = result.fetch()
+                
+                model_found = False
+                model_status = "Unknown"
+                if not models_df.empty:
+                    for _, model in models_df.iterrows():
+                        if model.get('NAME') == model_name:
+                            model_found = True
+                            model_status = model.get('STATUS', 'Unknown')
+                            logger.info(f"✅ Model {model_name} found with status: {model_status}")
+                            break
+                
+                if model_found:
+                    return {
+                        "message": f"Model {model_name} created successfully (Status: {model_status})",
+                        "status": "created",
+                        "model_name": model_name,
+                        "engine": engine_name,
+                        "column": column_name,
+                        "model": self.default_model,
+                        "model_status": model_status
+                    }
+                else:
+                    # Even if we can't find it in SHOW MODELS, return success
+                    # The actual chat test will determine if it works
+                    logger.warning(f"⚠️ Model {model_name} not found in SHOW MODELS but creation command succeeded")
+                    return {
+                        "message": f"Model {model_name} creation attempted",
+                        "status": "created",
+                        "model_name": model_name,
+                        "engine": engine_name,
+                        "column": column_name,
+                        "model": self.default_model,
+                        "model_status": "unknown"
+                    }
+                
+            except Exception as e:
+                if "already exists" in str(e).lower():
+                    logger.info(f"✅ Model {model_name} already exists")
+                    return {
+                        "message": f"Model {model_name} ready",
+                        "status": "exists",
+                        "model_name": model_name
+                    }
+                else:
+                    raise e
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to create model {model_name}: {e}")
+            return {
+                "message": f"Model creation failed: {str(e)}",
+                "status": "error",
+                "model_name": model_name
+            }
+
+    def ai_chat(self, message: str, model_name: Optional[str] = None) -> Dict[str, Any]:
+        """
+        [DEPRECATED] Handle AI chat using direct Google Gemini API.
+
+        This method is deprecated in favor of agent-based architecture.
+        Use chat_with_dataset_agent() instead which provides:
+        - Better context handling
+        - Multi-file dataset support
+        - Persistent conversation memory
+        - More robust error handling
+
+        Returns:
+            Dict with deprecation warning
+        """
+        logger.warning("⚠️ DEPRECATED: ai_chat() is deprecated in agent-based architecture")
+        logger.warning("   Use chat_with_dataset_agent() instead for better performance")
+
+        if not model_name:
+            model_name = self.chat_model_name
+
+        try:
+            # First try MindsDB approach
+            if self._ensure_connection() and self.connection:
+                try:
+                    logger.info(f"💬 Attempting MindsDB chat with model: {model_name}")
+                    
+                    # First ensure the model exists and is ready
+                    model_result = self.create_gemini_model(model_name)
+                    if model_result.get("status") == "error":
+                        logger.warning(f"⚠️ MindsDB model creation failed: {model_result.get('message')}")
+                        raise Exception(f"Model creation failed: {model_result.get('message')}")
+                    
+                    # Wait a moment for the model to be ready
+                    import time
+                    time.sleep(2)
+                    
+                    # Query the model using MindsDB
+                    query = f"""
+                    SELECT response 
+                    FROM {model_name} 
+                    WHERE question = '{message.replace("'", "''")}'
+                    """
+                    
+                    logger.info(f"🔍 Executing MindsDB query: {query}")
+                    result = self.connection.query(query)
+                    
+                    if result:
+                        try:
+                            if hasattr(result, 'fetch'):
+                                rows = result.fetch()
+                                if hasattr(rows, 'empty') and not rows.empty:
+                                    rows = rows.to_dict('records')
+                                elif not isinstance(rows, list):
+                                    rows = [rows] if rows is not None else []
+                            else:
+                                rows = []
+                            
+                            if rows and len(rows) > 0:
+                                row_data = rows[0]
+                                answer = ""
+                                
+                                if isinstance(row_data, dict):
+                                    answer = row_data.get('response', '')
+                                else:
+                                    answer = str(row_data)
+                                
+                                if not isinstance(answer, str):
+                                    answer = str(answer)
+                                
+                                # Clean up the response format
+                                if answer.startswith("{0: '") and answer.endswith("'}"):
+                                    answer = answer[5:-2]
+                                elif answer.startswith("{0: \"") and answer.endswith("\"}"):
+                                    answer = answer[5:-2]
+                                
+                                answer = answer.replace('\\n', '\n').strip()
+                                
+                                if answer and answer.strip():
+                                    logger.info(f"✅ MindsDB chat successful")
+                                    return {
+                                        "answer": answer,
+                                        "model": f"{model_name} (MindsDB)",
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                        "tokens_used": len(message.split()) + len(answer.split()),
+                                        "source": "mindsdb"
+                                    }
+                                else:
+                                    logger.warning(f"⚠️ MindsDB returned empty response")
+                                    raise Exception("Empty response from MindsDB")
+                            else:
+                                logger.warning(f"⚠️ MindsDB returned no rows")
+                                raise Exception("No rows returned from MindsDB")
+                                
+                        except Exception as fetch_error:
+                            logger.warning(f"⚠️ MindsDB fetch error: {fetch_error}")
+                            raise Exception(f"MindsDB fetch failed: {fetch_error}")
+                
+                except Exception as mindsdb_error:
+                    logger.warning(f"⚠️ MindsDB chat failed: {mindsdb_error}")
+                    # Fall through to direct API approach
+            
+            # Fallback to direct Google Gemini API
+            logger.info(f"🔄 Using direct Google Gemini API as fallback")
+            
+            if not self.api_key:
+                raise Exception("No Google API key available for direct API access")
+            
+            import google.generativeai as genai
+            
+            # Configure Gemini API
+            genai.configure(api_key=self.api_key)
+            
+            # Use model from environment configuration
+            model = genai.GenerativeModel(self.default_model)
+            
+            # Generate response
+            response = model.generate_content(message)
+            
+            if response and response.text:
+                logger.info(f"✅ Direct Google API chat successful")
+                return {
+                    "answer": response.text.strip(),
+                    "model": f"{self.default_model} (Direct API)",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "tokens_used": len(message.split()) + len(response.text.split()),
+                    "source": "google_direct_api"
+                }
+            else:
+                raise Exception("No response from Google API")
+
+        except Exception as e:
+            logger.error(f"❌ AI chat failed completely: {e}")
+            return {
+                "answer": f"I'm sorry, but I encountered an error while processing your question: {str(e)}",
+                "error": f"Chat failed: {str(e)}",
+                "model": "Error Handler",
+                "timestamp": datetime.utcnow().isoformat(),
+                "source": "error"
+            }
 
     def create_dataset_connection(self, dataset_name: str, file_url: str, file_type: str = "csv") -> Dict[str, Any]:
         """Create a dataset connection in MindsDB using a file URL."""
@@ -827,7 +1212,8 @@ class MindsDBService:
             if not self._ensure_connection():
                 return {"success": False, "error": "MindsDB connection not available"}
 
-            # Generate file name for MindsDB upload
+            # Generate clean database name and file name for MindsDB
+            clean_name = f"file_db_{file_upload.id}"
             mindsdb_file_name = f"dataset_{file_upload.dataset_id}_file_{file_upload.id}"
 
             # Determine the appropriate engine and parameters based on file type
@@ -885,25 +1271,51 @@ class MindsDBService:
                     except:
                         pass
 
-            # Files uploaded to MindsDB are accessible via the "files" database directly
-            # No need to create a separate database connector
-            # The uploaded file is accessible at: files.{uploaded_file_name}
+            # Create database connector using files engine with uploaded file
+            connection_params = {"file": uploaded_file_name}
+            engine = "files"
 
-            logger.info(f"✅ File uploaded to MindsDB: files.{uploaded_file_name}")
-
-            # Test the connector by trying to fetch data from the files database
-            test_result = self.test_file_database_connector("files", file_upload, uploaded_file_name)
-
-            return {
-                "success": True,
-                "database_name": "files",  # Use the built-in files database
-                "engine": "files",
-                "file_path": file_upload.file_path,
-                "file_type": file_ext,
-                "uploaded_filename": uploaded_file_name,  # Return the uploaded filename
-                "test_result": test_result,
-                "message": f"File uploaded to MindsDB files database as {uploaded_file_name}"
-            }
+            # Create the database connector using MindsDB SQL
+            create_db_sql = f"""
+            CREATE DATABASE IF NOT EXISTS {clean_name}
+            WITH ENGINE = '{engine}',
+            PARAMETERS = {json.dumps(connection_params)};
+            """
+            
+            logger.info(f"🗄️ Creating file database connector: {clean_name}")
+            logger.info(f"📄 SQL: {create_db_sql}")
+            
+            try:
+                result = self.connection.query(create_db_sql)
+                logger.info(f"✅ File database connector {clean_name} created successfully")
+                
+                # Test the connector by trying to fetch data
+                test_result = self.test_file_database_connector(clean_name, file_upload)
+                
+                return {
+                    "success": True,
+                    "database_name": clean_name,
+                    "engine": engine,
+                    "file_path": file_upload.file_path,
+                    "file_type": file_ext,
+                    "uploaded_filename": uploaded_file_name,  # Return the uploaded filename
+                    "test_result": test_result,
+                    "message": f"File database connector {clean_name} created successfully"
+                }
+                
+            except Exception as e:
+                if "already exists" in str(e).lower():
+                    logger.info(f"✅ File database connector {clean_name} already exists")
+                    return {
+                        "success": True,
+                        "database_name": clean_name,
+                        "engine": engine,
+                        "file_path": file_upload.file_path,
+                        "file_type": file_ext,
+                        "message": f"File database connector {clean_name} already exists"
+                    }
+                else:
+                    raise e
                     
         except Exception as e:
             logger.error(f"❌ Failed to create file database connector for {file_upload.original_filename}: {e}")
@@ -913,26 +1325,19 @@ class MindsDBService:
                 "file_upload_id": file_upload.id
             }
 
-    def test_file_database_connector(self, database_name: str, file_upload: "FileUpload", uploaded_file_name: str = None) -> Dict[str, Any]:
+    def test_file_database_connector(self, database_name: str, file_upload: "FileUpload") -> Dict[str, Any]:
         """Test a file database connector by fetching sample data."""
         try:
             if not self._ensure_connection():
                 return {"success": False, "error": "MindsDB connection not available"}
 
             # Try different table names that MindsDB might use for file data
-            possible_table_names = []
-
-            # If we have the uploaded file name, try it first
-            if uploaded_file_name:
-                possible_table_names.append(uploaded_file_name)
-
-            # Then try other common patterns
-            possible_table_names.extend([
+            possible_table_names = [
                 file_upload.original_filename.split('.')[0],  # filename without extension
                 "data",  # common default
                 "file",  # another common default
                 f"uploaded_file_{file_upload.id}"  # our custom name
-            ])
+            ]
             
             for table_name in possible_table_names:
                 try:
@@ -1005,7 +1410,238 @@ class MindsDBService:
                 "timestamp": datetime.utcnow().isoformat()
             }
 
+    def create_dataset_ml_model(
+        self, 
+        dataset_id: int, 
+        dataset_name: str, 
+        dataset_type: str, 
+        dataset_content: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Create ML models for a dataset (chat model with Gemini)."""
+        try:
+            logger.info(f"🤖 Creating ML models for dataset {dataset_id} ({dataset_name})")
+            
+            # Ensure MindsDB connection
+            if not self._ensure_connection():
+                logger.error("❌ MindsDB connection failed")
+                return {
+                    "success": False,
+                    "error": "MindsDB connection failed",
+                    "dataset_id": dataset_id
+                }
+            
+            # Clean dataset name for MindsDB model naming
+            clean_dataset_name = dataset_name.lower().replace(' ', '_').replace('-', '_')
+            model_name = f"dataset_{dataset_id}_chat_model"
+            
+            # Create chat model using Gemini engine
+            prompt_template = f"""You are an AI assistant specialized in analyzing and discussing the dataset "{dataset_name}".
 
+Dataset Information:
+- Name: {dataset_name}
+- Type: {dataset_type}
+- Dataset ID: {dataset_id}
+
+You are designed to help users understand and analyze this specific dataset. When answering questions:
+1. Be specific about this dataset
+2. Provide helpful insights when possible
+3. Explain any patterns or concepts clearly
+4. Suggest relevant analyses or questions
+5. Be helpful and informative
+
+User Question: {{{{question}}}}
+
+Please provide a comprehensive answer about this dataset:"""
+
+            # Create the chat model
+            chat_model_result = self.create_gemini_model(
+                model_name=model_name,
+                model_type="chat",
+                column_name="response"
+            )
+            
+            # Update the model with specific prompt template if creation was successful
+            if chat_model_result.get("status") == "created":
+                try:
+                    # Try to set a custom prompt template for this specific dataset
+                    update_query = f"""
+                    CREATE OR REPLACE MODEL {model_name}
+                    PREDICT response
+                    USING
+                        engine = '{self.engine_name}',
+                        model_name = '{self.default_model}',
+                        prompt_template = '{prompt_template}',
+                        max_tokens = 1500;
+                    """
+                    
+                    self.connection.query(update_query)
+                    logger.info(f"✅ Updated chat model {model_name} with dataset-specific prompt")
+                    
+                except Exception as update_error:
+                    logger.warning(f"⚠️ Could not update model prompt template: {update_error}")
+                    # Continue anyway - model was created successfully
+            
+            logger.info(f"✅ ML models created for dataset {dataset_id}")
+            
+            return {
+                "success": True,
+                "models_created": [
+                    {
+                        "name": model_name,
+                        "type": "chat",
+                        "engine": self.engine_name,
+                        "status": chat_model_result.get("status", "unknown")
+                    }
+                ],
+                "dataset_id": dataset_id,
+                "dataset_name": dataset_name
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to create ML models for dataset {dataset_id}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "dataset_id": dataset_id
+            }
+
+    def delete_dataset_models(self, dataset_id: int) -> Dict[str, Any]:
+        """Delete all MindsDB models associated with a dataset."""
+        try:
+            logger.info(f"🗑️ Deleting ML models for dataset {dataset_id}")
+            
+            # Ensure MindsDB connection
+            if not self._ensure_connection():
+                logger.error("❌ MindsDB connection failed")
+                return {
+                    "success": False,
+                    "error": "MindsDB connection failed",
+                    "dataset_id": dataset_id
+                }
+            
+            deleted_models = []
+            errors = []
+            
+            # List of model patterns to look for and delete
+            model_patterns = [
+                f"dataset_{dataset_id}_chat_model",
+                f"dataset_{dataset_id}_model",
+                f"dataset_{dataset_id}_embedding_model",
+                f"dataset_{dataset_id}_vision_model"
+            ]
+            
+            for model_name in model_patterns:
+                try:
+                    # Check if model exists
+                    check_query = f"SHOW MODELS WHERE name = '{model_name}'"
+                    result = self.connection.query(check_query)
+                    
+                    if result and hasattr(result, 'fetch'):
+                        models_df = result.fetch()
+                        if not models_df.empty:
+                            # Model exists, delete it
+                            logger.info(f"🗑️ Deleting model: {model_name}")
+                            delete_query = f"DROP MODEL {model_name}"
+                            self.connection.query(delete_query)
+                            deleted_models.append(model_name)
+                            logger.info(f"✅ Successfully deleted model: {model_name}")
+                        else:
+                            logger.info(f"ℹ️ Model {model_name} does not exist, skipping")
+                    else:
+                        logger.info(f"ℹ️ Could not check existence of model {model_name}, attempting delete anyway")
+                        
+                        # Try to delete anyway in case the check failed
+                        try:
+                            delete_query = f"DROP MODEL IF EXISTS {model_name}"
+                            self.connection.query(delete_query)
+                            deleted_models.append(model_name)
+                            logger.info(f"✅ Successfully deleted model: {model_name}")
+                        except Exception as delete_error:
+                            error_msg = str(delete_error)
+                            if "does not exist" not in error_msg.lower():
+                                logger.warning(f"⚠️ Could not delete model {model_name}: {error_msg}")
+                                errors.append(f"{model_name}: {error_msg}")
+                            else:
+                                logger.info(f"ℹ️ Model {model_name} does not exist")
+                        
+                except Exception as e:
+                    error_msg = str(e)
+                    if "does not exist" not in error_msg.lower():
+                        logger.warning(f"⚠️ Error checking/deleting model {model_name}: {error_msg}")
+                        errors.append(f"{model_name}: {error_msg}")
+                    else:
+                        logger.info(f"ℹ️ Model {model_name} does not exist")
+            
+            # Also clean up any other models that might follow different naming patterns
+            try:
+                # Get all models and find any that contain the dataset ID
+                all_models_query = "SHOW MODELS"
+                result = self.connection.query(all_models_query)
+                
+                if result and hasattr(result, 'fetch'):
+                    all_models_df = result.fetch()
+                    
+                    # Look for models that contain the dataset ID
+                    dataset_models = all_models_df[
+                        all_models_df['NAME'].str.contains(f"dataset_{dataset_id}", case=False, na=False) |
+                        all_models_df['NAME'].str.contains(f"_{dataset_id}_", case=False, na=False)
+                    ]
+                    
+                    for _, model_row in dataset_models.iterrows():
+                        model_name = model_row['NAME']
+                        if model_name not in deleted_models:
+                            try:
+                                logger.info(f"🗑️ Deleting additional dataset model: {model_name}")
+                                delete_query = f"DROP MODEL {model_name}"
+                                self.connection.query(delete_query)
+                                deleted_models.append(model_name)
+                                logger.info(f"✅ Successfully deleted additional model: {model_name}")
+                            except Exception as delete_error:
+                                error_msg = str(delete_error)
+                                logger.warning(f"⚠️ Could not delete additional model {model_name}: {error_msg}")
+                                errors.append(f"{model_name}: {error_msg}")
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Could not check for additional dataset models: {e}")
+                errors.append(f"Additional model check failed: {str(e)}")
+            
+            result = {
+                "success": len(deleted_models) > 0 or len(errors) == 0,
+                "deleted_models": deleted_models,
+                "errors": errors,
+                "dataset_id": dataset_id
+            }
+            
+            if deleted_models:
+                logger.info(f"✅ Successfully deleted {len(deleted_models)} models for dataset {dataset_id}: {deleted_models}")
+            else:
+                logger.info(f"ℹ️ No models found to delete for dataset {dataset_id}")
+                
+            if errors:
+                logger.warning(f"⚠️ Some errors occurred while deleting models for dataset {dataset_id}: {errors}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to delete models for dataset {dataset_id}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "dataset_id": dataset_id,
+                "deleted_models": [],
+                "errors": [str(e)]
+            }
+
+    # MindsDB supported file extensions
+    SUPPORTED_FILE_EXTENSIONS = {
+        '.csv': 'csv',
+        '.xlsx': 'xlsx', 
+        '.xls': 'xls',
+        '.json': 'json',
+        '.txt': 'txt',
+        '.pdf': 'pdf',
+        '.parquet': 'parquet'
+    }
 
     def is_supported_file_type(self, file_path: str) -> bool:
         """Check if file type is supported by MindsDB."""
@@ -1112,6 +1748,72 @@ class MindsDBService:
             logger.error(f"❌ Error deleting database connector {database_name}: {e}")
             return False
 
+    def create_model_for_uploaded_file(self, file_name: str, file_type: str) -> Optional[str]:
+        """Create appropriate MindsDB model based on file type."""
+        
+        try:
+            if not self._ensure_connection():
+                logger.error("Could not connect to MindsDB")
+                return None
+            
+            logger.info("✅ Connected to MindsDB")
+            
+            # Test file access
+            test_query = f"SELECT * FROM files.{file_name} LIMIT 1"
+            logger.info(f"🔍 Testing file access: {test_query}")
+            
+            try:
+                result = self.connection.query(test_query)
+                logger.info("✅ File is accessible in MindsDB")
+            except Exception as e:
+                logger.error(f"❌ Cannot access file in MindsDB: {e}")
+                return None
+            
+            model_name = f"{file_name}_model"
+            
+            # Create different models based on file type
+            if file_type in ['pdf', 'txt']:
+                # RAG model for text-based files
+                model_sql = f"""
+                CREATE MODEL mindsdb.{model_name}
+                FROM files 
+                    (SELECT * FROM {file_name})
+                PREDICT answer
+                USING
+                   engine="rag",
+                   llm_type="openai",
+                   input_column='question';
+                """
+                model_type = "RAG"
+                
+            elif file_type in ['csv', 'xlsx', 'xls', 'json', 'parquet']:
+                # Knowledge base for structured data
+                model_sql = f"""
+                CREATE KNOWLEDGE_BASE mindsdb.{model_name}
+                FROM files.{file_name}
+                USING
+                   model='text-embedding-ada-002',
+                   storage=mindsdb;
+                """
+                model_type = "Knowledge Base"
+            
+            else:
+                logger.error(f"Unsupported file type for model creation: {file_type}")
+                return None
+            
+            logger.info(f"🤖 Creating {model_type} model: {model_name}")
+            logger.info(f"SQL: {model_sql}")
+            
+            result = self.connection.query(model_sql)
+            logger.info(f"✅ {model_type} model created successfully: {model_name}")
+            
+            return model_name
+            
+        except Exception as e:
+            logger.error(f"❌ Error creating model: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def setup_file_dataset_processing(self, dataset, db_session) -> Dict[str, Any]:
         """Setup MindsDB processing for uploaded file dataset."""
@@ -1308,6 +2010,37 @@ class MindsDBService:
     # AGENT-BASED ARCHITECTURE METHODS (New)
     # ============================================================
 
+    def get_model_config(self, dataset=None) -> Dict[str, Any]:
+        """
+        Get model configuration with optional dataset-specific overrides.
+        Supports hybrid approach: global defaults with per-dataset customization.
+        """
+        try:
+            # Default provider configuration
+            default_provider = getattr(settings, 'DEFAULT_LLM_PROVIDER', 'google')
+
+            # Check if dataset has custom model preference
+            if dataset and hasattr(dataset, 'chat_model_name') and dataset.chat_model_name:
+                provider = dataset.chat_model_provider or default_provider
+                return {
+                    'provider': provider,
+                    'model_name': dataset.chat_model_name,
+                    'api_key': self.api_key
+                }
+
+            # Use default configuration
+            return {
+                'provider': default_provider,
+                'model_name': self.default_model,
+                'api_key': self.api_key
+            }
+        except Exception as e:
+            logger.error(f"Error getting model config: {e}")
+            return {
+                'provider': 'google',
+                'model_name': self.default_model,
+                'api_key': self.api_key
+            }
 
     def create_or_get_agent(self, agent_name: str, tables: List[str], prompt_template: str,
                            model_config: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -1963,25 +2696,15 @@ This is a multi-file dataset - USE ALL AVAILABLE FILES to provide comprehensive 
                 agent_result = self.setup_single_file_agent(dataset, db)
 
             if not agent_result.get("success"):
-                error_msg = f"Agent setup failed: {agent_result.get('error')}"
-                logger.error(error_msg)
-                return {
-                    "success": False,
-                    "error": error_msg,
-                    "message": "Failed to create agent for dataset. Please ensure MindsDB is running and configured properly."
-                }
+                logger.warning(f"Agent setup failed: {agent_result.get('error')}, using fallback")
+                return self._fallback_gemini_chat(message, dataset)
 
             agent_name = agent_result["agent_name"]
 
             # Get agent from MindsDB
             if not self._ensure_connection():
-                error_msg = "Failed to connect to MindsDB"
-                logger.error(error_msg)
-                return {
-                    "success": False,
-                    "error": error_msg,
-                    "message": "Cannot connect to MindsDB. Please ensure MindsDB server is running."
-                }
+                logger.warning("Connection failed, using fallback")
+                return self._fallback_gemini_chat(message, dataset)
 
             agent = self.connection.agents.get(agent_name)
 
@@ -2077,7 +2800,7 @@ This is a multi-file dataset - USE ALL AVAILABLE FILES to provide comprehensive 
                         "tables_count": agent_result.get("tables_count", 1),
                         "response_time": response_time,
                         "streaming": True,
-                        "model": self.agent_model,  # MindsDB agent model
+                        "model": self.get_model_config(dataset).get("model_name"),
                         # Visualization data
                         "visualizations": visualizations,
                         "data_analysis": data_analysis,
@@ -2113,24 +2836,52 @@ This is a multi-file dataset - USE ALL AVAILABLE FILES to provide comprehensive 
 
             except Exception as e:
                 logger.error(f"Agent query failed: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
-                return {
-                    "success": False,
-                    "error": str(e),
-                    "message": "Agent query failed. Please check MindsDB connection and agent configuration."
-                }
+                return self._fallback_gemini_chat(message, dataset)
 
         except Exception as e:
             logger.error(f"❌ Chat with agent failed: {e}")
             import traceback
             logger.error(traceback.format_exc())
+
+            # Fallback to direct Gemini API
+            return self._fallback_gemini_chat(message, dataset)
+
+    def _fallback_gemini_chat(self, message: str, dataset) -> Dict[str, Any]:
+        """
+        Fallback to direct Gemini API if agent-based approach fails.
+        Maintains compatibility while agent system is being deployed.
+        """
+        try:
+            logger.info("🔄 Using fallback Gemini API")
+
+            # Build context from dataset
+            context = f"""Dataset: {dataset.name}
+Description: {dataset.description or 'No description'}
+Type: {dataset.type.value if hasattr(dataset.type, 'value') else str(dataset.type)}
+
+User Question: {message}
+
+Please provide a helpful response based on the dataset information available."""
+
+            # Use direct Gemini API
+            model = genai.GenerativeModel(self.default_model)
+            response = model.generate_content(context)
+
+            return {
+                "success": True,
+                "answer": response.text,
+                "source": "fallback_gemini",
+                "streaming": False,
+                "model": self.default_model
+            }
+
+        except Exception as e:
+            logger.error(f"Fallback also failed: {e}")
             return {
                 "success": False,
-                "error": str(e),
-                "message": "Chat with dataset agent failed. Please ensure MindsDB is properly configured."
+                "error": f"Unable to process request: {str(e)}"
             }
 
 
-# Global service instance
+# Create service instance
 mindsdb_service = MindsDBService()

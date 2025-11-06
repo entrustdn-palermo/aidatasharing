@@ -393,7 +393,9 @@ async def admin_delete_dataset(
         try:
             from app.services.mindsdb import MindsDBService
             mindsdb_service = MindsDBService()
-            ml_cleanup_result = mindsdb_service.delete_dataset_models(dataset_id)
+            # Clean up associated agent if exists
+            if dataset.agent_name:
+                mindsdb_service.delete_agent(dataset.agent_name)
             logger.info(f"ML models cleanup result: {ml_cleanup_result}")
         except Exception as e:
             logger.warning(f"ML models cleanup failed: {e}")
