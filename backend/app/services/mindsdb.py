@@ -2,21 +2,22 @@
 Entrust Data Sharing MCP Platform - MindsDB Agent Service
 
 This service implements the agent-based architecture for data interactions.
-The platform now exclusively uses MindsDB agents instead of direct Gemini API calls.
+The platform exclusively uses MindsDB agents for all AI-powered features.
 
-Architecture Changes:
-- Chat with datasets is now handled by MindsDB agents (not direct Gemini)
+Architecture:
+- Chat with datasets is handled by MindsDB agents
 - Supported file types: CSV, XLSX, XLS, JSON, TXT, PDF, Parquet
-- Agents are configured and managed through MindsDB
-- Direct LLM API usage (Gemini) is deprecated and kept only for backward compatibility
+- Agents are configured and managed through MindsDB SDK
+- All LLM interactions go through MindsDB's pre-configured models
 
-Methodology:
-Previous: Chat with dataset using direct Gemini API
-Current: MindsDB agents interact with datasets through agent-based architecture
+Features:
+- Single-file dataset agents
+- Multi-file dataset agents with multiple table access
+- Automatic file upload and database connector creation
+- Persistent agent management with database tracking
 """
 
 import mindsdb_sdk
-import google.generativeai as genai  # Legacy - kept for backward compatibility
 from typing import Dict, List, Optional, Any
 from app.core.config import settings
 from app.core.app_config import get_app_config
@@ -81,20 +82,6 @@ class MindsDBService:
         # Agent-based configuration
         self.agent_model = settings.MINDSDB_AGENT_MODEL
         logger.info(f"🤖 MindsDB Agent model: {self.agent_model}")
-
-        # Legacy model configurations (deprecated - kept for backward compatibility)
-        self.engine_name = settings.GEMINI_ENGINE_NAME
-        self.default_model = settings.DEFAULT_GEMINI_MODEL
-        self.chat_model_name = settings.GEMINI_CHAT_MODEL_NAME
-        self.vision_model_name = settings.GEMINI_VISION_MODEL_NAME
-        self.embedding_model_name = settings.GEMINI_EMBEDDING_MODEL_NAME
-
-        # Configure Gemini directly (DEPRECATED - only for backward compatibility)
-        try:
-            genai.configure(api_key=self.api_key)
-            logger.warning("⚠️ Direct Gemini configuration is deprecated in agent-based architecture")
-        except Exception as e:
-            logger.debug(f"Gemini configuration skipped: {e}")
 
         # Connection state
         self.connection = None
