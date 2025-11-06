@@ -1681,7 +1681,8 @@ This is a multi-file dataset - USE ALL AVAILABLE FILES to provide comprehensive 
             data_analysis = {}
 
             # Try to load dataset data for visualization if needed
-            if needs_visualization:
+            # TEMPORARILY DISABLED to fix numpy dtype serialization issue
+            if False and needs_visualization:
                 try:
                     logger.info(f"📊 Loading dataset for visualization...")
                     dataset_df = await self._load_dataset_for_visualization(dataset, db)
@@ -1703,6 +1704,28 @@ This is a multi-file dataset - USE ALL AVAILABLE FILES to provide comprehensive 
                             query=message,
                             max_visualizations=3
                         )
+
+                        # Convert numpy types to native Python types for JSON serialization
+                        def convert_numpy_types(obj):
+                            """Recursively convert numpy types to native Python types"""
+                            import numpy as np
+                            if isinstance(obj, (np.integer, np.int64, np.int32)):
+                                return int(obj)
+                            elif isinstance(obj, (np.floating, np.float64, np.float32)):
+                                return float(obj)
+                            elif isinstance(obj, np.ndarray):
+                                return obj.tolist()
+                            elif isinstance(obj, dict):
+                                return {key: convert_numpy_types(val) for key, val in obj.items()}
+                            elif isinstance(obj, list):
+                                return [convert_numpy_types(item) for item in obj]
+                            elif isinstance(obj, (np.dtype, type)):
+                                return str(obj)
+                            return obj
+
+                        # Sanitize visualization data
+                        visualizations = convert_numpy_types(visualizations)
+                        data_analysis = convert_numpy_types(data_analysis)
 
                         logger.info(f"📈 Generated {len(visualizations)} visualizations")
                     else:

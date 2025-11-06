@@ -110,7 +110,10 @@ htmlcov/
 # Security
 *.pem
 *.key
-!*.key.example 
+!*.key.example
+
+# Reports (sensitive internal documentation)
+report/
 
 node_modules/
 *.sqlite
