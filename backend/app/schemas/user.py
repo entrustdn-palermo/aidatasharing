@@ -56,5 +56,4 @@ class Token(BaseModel):
     token_type: str
 
 
-class TokenPayload(BaseModel):
-    sub: Optional[int] = None 
+ 

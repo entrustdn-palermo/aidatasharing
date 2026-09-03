@@ -282,18 +282,3 @@ def parse_api_url(url: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     
     return connection_config, credentials
 
-
-def validate_connection_url(url: str, connector_type: str) -> Tuple[bool, Optional[str]]:
-    """
-    Validate a connection URL without fully parsing it
-    
-    Returns:
-        Tuple of (is_valid, error_message)
-    """
-    try:
-        parse_connection_url(url, connector_type)
-        return True, None
-    except ConnectionParseError as e:
-        return False, str(e)
-    except Exception as e:
-        return False, f"Unexpected error: {str(e)}"

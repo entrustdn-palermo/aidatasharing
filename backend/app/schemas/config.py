@@ -30,6 +30,4 @@ class ConfigurationInDBBase(ConfigurationBase):
 class Configuration(ConfigurationInDBBase):
     pass
 
-
-class ConfigurationInDB(ConfigurationInDBBase):
-    pass 
+ 

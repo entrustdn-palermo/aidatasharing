@@ -5,19 +5,7 @@ import { ProtectedRoute } from '@/components/auth/ProtectedRoute';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { useAuth } from '@/components/auth/AuthProvider';
 import { datasetsAPI } from '@/lib/api';
-import { 
-  BarChart3, 
-  TrendingUp, 
-  Users, 
-  Database, 
-  Activity,
-  Calendar,
-  Download,
-  RefreshCw,
-  HardDrive,
-  CheckCircle,
-  AlertTriangle,
-} from 'lucide-react';
+import {BarChart3, Users, Database, Activity, Calendar, Download, RefreshCw, HardDrive, CheckCircle, AlertTriangle, } from 'lucide-react';
 
 interface AnalyticsData {
   organization: {

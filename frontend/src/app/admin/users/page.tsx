@@ -5,21 +5,7 @@ import { ProtectedRoute } from '@/components/auth/ProtectedRoute';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { adminAPI } from '@/lib/api';
 import Link from 'next/link';
-import {
-  User,
-  Users,
-  Building,
-  Settings,
-  Plus,
-  Edit,
-  Trash2,
-  Eye,
-  Search,
-  Filter,
-  Shield,
-  UserCheck,
-  UserX
-} from 'lucide-react';
+import {User, Users, Building, Plus, Edit, Trash2, Eye, Search, Filter, Shield, UserCheck, UserX} from 'lucide-react';
 
 interface AdminUser {
   id: string;

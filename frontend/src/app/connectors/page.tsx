@@ -2,21 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { 
-  Database,
-  Plus,
-  TestTube,
-  RefreshCw,
-  Trash2,
-  Globe,
-  Lock,
-  Copy,
-  ExternalLink,
-  Shield,
-  Zap,
-  Settings,
-  Link as LinkIcon
-} from 'lucide-react';
+import {Database, Plus, TestTube, RefreshCw, Trash2, Globe, Copy, Shield, Zap, Link as LinkIcon} from 'lucide-react';
 import { ProtectedRoute } from '@/components/auth/ProtectedRoute';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { dataConnectorsAPI } from '@/lib/api';

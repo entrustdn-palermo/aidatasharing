@@ -1,8 +1,8 @@
 from typing import List, Optional, Dict, Any
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import and_, or_
 from app.models.user import User
-from app.models.dataset import Dataset, DatasetAccessLog, DatasetChatSession, ChatMessage, DatasetShareAccess, DatabaseConnector
+from app.models.dataset import Dataset, DatasetAccessLog, DatasetChatSession, ChatMessage, DatasetShareAccess, DatabaseConnector, DatasetType
 from app.models.organization import Organization, DataSharingLevel, UserRole
 from datetime import datetime, timedelta
 import logging
@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 from fastapi import HTTPException, status
 from app.core.config import settings
+from app.core.auth import get_password_hash, verify_password
 from app.services.mindsdb import MindsDBService
 
 logger = logging.getLogger(__name__)
@@ -81,8 +82,8 @@ class DataSharingService:
         if dataset.owner_id == user.id:
             return True
         
-        # Check organization-level download policies
-        org_download_policy = self._get_organization_download_policy(user.organization_id)
+        # Check the dataset owner's organization policy because it controls data egress.
+        org_download_policy = self._get_organization_download_policy(dataset.organization_id)
         
         # If organization has strict download policy, only owners and admins can download
         if org_download_policy.get("restrict_downloads", False):
@@ -327,43 +328,52 @@ class DataSharingService:
             logger.error(f"Failed to log download attempt: {e}")
             return False
     
-    def get_accessible_datasets(self, user: User, 
+    def get_accessible_datasets(self, user: User,
                               sharing_level: Optional[DataSharingLevel] = None,
                               include_inactive: bool = False,
-                              include_deleted: bool = False) -> List[Dataset]:
+                              include_deleted: bool = False,
+                              dataset_type: Optional[DatasetType] = None,
+                              skip: Optional[int] = None,
+                              limit: Optional[int] = None) -> List[Dataset]:
         """
-        Get all datasets accessible to a user within their organization.
+        Get datasets accessible to a user.
         """
-        if not user.organization_id:
-            return []
-        
-        query = self.db.query(Dataset).filter(
-            Dataset.organization_id == user.organization_id
-        )
-        
-        # Filter out deleted datasets by default
+        query = self.db.query(Dataset).options(selectinload(Dataset.owner))
+
         if not include_deleted:
             query = query.filter(Dataset.is_deleted == False)
-        
-        # Filter out inactive datasets by default
+
         if not include_inactive:
             query = query.filter(Dataset.is_active == True)
-        
-        # Filter by sharing level if specified
+
         if sharing_level:
             query = query.filter(Dataset.sharing_level == sharing_level)
-        
-        datasets = query.all()
-        
-        # Filter based on access permissions
-        accessible_datasets = []
-        for dataset in datasets:
-            if self.can_access_dataset(user, dataset):
-                accessible_datasets.append(dataset)
-        
-        return accessible_datasets
-    
-    def get_organization_datasets(self, organization_id: int, 
+
+        if dataset_type:
+            query = query.filter(Dataset.type == dataset_type)
+
+        public_levels = [DataSharingLevel.PUBLIC, DataSharingLevel.PUBLIC.value]
+        organization_levels = [DataSharingLevel.ORGANIZATION, DataSharingLevel.ORGANIZATION.value]
+        query = query.filter(or_(
+            Dataset.owner_id == user.id,
+            Dataset.sharing_level.in_(public_levels),
+            and_(
+                Dataset.organization_id == user.organization_id,
+                Dataset.sharing_level.in_(organization_levels)
+            )
+        ))
+
+        query = query.order_by(Dataset.created_at.desc(), Dataset.id.desc())
+
+        if skip is not None:
+            query = query.offset(skip)
+
+        if limit is not None:
+            query = query.limit(limit)
+
+        return query.all()
+
+    def get_organization_datasets(self, organization_id: int,
                                 user: User) -> List[Dataset]:
         """
         Get all datasets for an organization (admin/manager view).
@@ -550,6 +560,23 @@ class DataSharingService:
             Dataset.sharing_level == DataSharingLevel.ORGANIZATION
         ).all()
 
+    def verify_share_password(self, dataset: Dataset, password: Optional[str]) -> bool:
+        if not dataset.share_password:
+            return True
+        if not password:
+            return False
+        try:
+            return verify_password(password, dataset.share_password)
+        except Exception:
+            return password == dataset.share_password
+
+    def require_share_password(self, dataset: Dataset, password: Optional[str]) -> None:
+        if not self.verify_share_password(dataset, password):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid password"
+            )
+
     def create_share_link(
         self,
         dataset_id: int,
@@ -562,21 +589,27 @@ class DataSharingService:
             Dataset.id == dataset_id,
             Dataset.owner_id == user_id
         ).first()
-        
+
         if not dataset:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Dataset not found or access denied"
             )
-        
+
+        if not dataset.organization or not dataset.organization.allow_external_sharing:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="External sharing is disabled for this organization"
+            )
+
         # Generate unique share token
         share_token = self._generate_share_token(dataset_id, user_id)
-        
+
         # Update dataset with sharing information
         dataset.public_share_enabled = True
         dataset.share_token = share_token
-        dataset.share_password = password
-        dataset.ai_chat_enabled = enable_chat and settings.ENABLE_AI_CHAT
+        dataset.share_password = get_password_hash(password) if password else None
+        dataset.ai_chat_enabled = enable_chat and dataset.allow_ai_chat and settings.ENABLE_AI_CHAT
         
         # Only create proxy connector for connector-based datasets, not uploaded files
         if dataset.connector_id:
@@ -623,13 +656,8 @@ class DataSharingService:
                 detail="Shared dataset not found or no longer available"
             )
         
-        # Check password if required
-        if dataset.share_password and dataset.share_password != password:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid password"
-            )
-        
+        self.require_share_password(dataset, password)
+
         # Check if dataset depends on a connector and validate connector status
         if dataset.connector_id:
             connector = self.db.query(DatabaseConnector).filter(
@@ -668,8 +696,7 @@ class DataSharingService:
                         # Check if file exists using storage service (works for both S3 and local)
                         try:
                             file_path = f.relative_path or f.file_path
-                            content = await storage_service.retrieve_dataset_file(file_path)
-                            if content is not None:
+                            if await storage_service.dataset_file_exists(file_path):
                                 file_exists = True
                                 break
                         except Exception as e:
@@ -689,8 +716,7 @@ class DataSharingService:
                 from app.services.storage import storage_service
                 try:
                     # Use storage service to check file existence (works for both S3 and local)
-                    content = await storage_service.retrieve_dataset_file(dataset.file_path)
-                    file_exists = content is not None
+                    file_exists = await storage_service.dataset_file_exists(dataset.file_path)
                 except Exception:
                     file_exists = False
                 
@@ -787,8 +813,7 @@ class DataSharingService:
                 actual_file_path = None
                 from app.services.storage import storage_service
                 try:
-                    content = await storage_service.retrieve_dataset_file(dataset.file_path)
-                    file_exists = content is not None
+                    file_exists = await storage_service.dataset_file_exists(dataset.file_path)
                     # For local storage, set actual file path for CSV preview
                     if file_exists and hasattr(storage_service.backend, 'storage_dir'):
                         actual_file_path = os.path.join(storage_service.backend.storage_dir, dataset.file_path)
@@ -906,7 +931,9 @@ class DataSharingService:
         dataset = self.db.query(Dataset).filter(
             Dataset.share_token == share_token,
             Dataset.public_share_enabled == True,
-            Dataset.ai_chat_enabled == True
+            Dataset.ai_chat_enabled == True,
+            Dataset.is_deleted == False,
+            Dataset.is_active == True
         ).first()
         
         if not dataset:
@@ -973,7 +1000,16 @@ class DataSharingService:
             )
         
         dataset = session.dataset
-        
+
+        # Verify dataset is still accessible for chat
+        if not dataset or dataset.is_deleted or not dataset.is_active or not dataset.ai_chat_enabled:
+            session.is_active = False
+            self.db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail="Dataset is no longer available for chat"
+            )
+
         # Save user message
         user_message = ChatMessage(
             session_id=session.id,
@@ -1055,6 +1091,14 @@ class DataSharingService:
                 detail="Chat session not found"
             )
         
+        # Verify dataset is still accessible
+        dataset = session.dataset
+        if not dataset or dataset.is_deleted or not dataset.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail="Dataset is no longer available"
+            )
+
         messages = self.db.query(ChatMessage).filter(
             ChatMessage.session_id == session.id
         ).order_by(ChatMessage.created_at).all()

@@ -5,42 +5,100 @@ Exports database schema and data to SQL file
 """
 import os
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 import subprocess
+from pathlib import Path
+from urllib.parse import urlparse, unquote
 
-# Database connection details from .env
-DB_HOST = "aws-1-eu-central-2.pooler.supabase.com"
-DB_PORT = "6543"
-DB_USER = "postgres.ozzvnkmlntifpomkadaf"
-DB_PASSWORD = "Juliozafran"
-DB_NAME = "postgres"
+try:
+    from dotenv import dotenv_values
+except ImportError:
+    dotenv_values = None
 
-def backup_with_pg_dump():
-    """Backup database using pg_dump command"""
-    # Create backup directory
-    backup_dir = os.path.join(os.path.dirname(__file__), "..", "sql", "backups")
-    os.makedirs(backup_dir, exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parents[1]
+BACKUP_DIR = BASE_DIR / "sql" / "backups"
 
-    # Generate backup filename with timestamp
+
+@dataclass(frozen=True)
+class DatabaseConfig:
+    url: str
+    host: str
+    port: str
+    user: str
+    password: str
+    database: str
+
+
+def get_env_files():
+    env_files = [BASE_DIR / "backend" / ".env", BASE_DIR / ".env"]
+    backend_env_file = os.getenv("BACKEND_ENV_FILE")
+    if backend_env_file:
+        env_files.insert(0, Path(backend_env_file))
+    return env_files
+
+
+def load_database_url():
+    env_url = os.getenv("DATABASE_URL")
+    if env_url:
+        return env_url.strip()
+
+    if dotenv_values is None:
+        raise RuntimeError("DATABASE_URL not found. Install python-dotenv or set it in the environment.")
+
+    for env_path in get_env_files():
+        if not env_path.exists():
+            continue
+        env_url = dotenv_values(env_path).get("DATABASE_URL")
+        if env_url:
+            return env_url.strip()
+
+    raise RuntimeError("DATABASE_URL not found. Set it in environment or .env file.")
+
+
+def parse_database_url(database_url: str) -> DatabaseConfig:
+    parsed = urlparse(database_url)
+    if parsed.scheme not in ("postgresql", "postgres"):
+        raise RuntimeError("DATABASE_URL must be a PostgreSQL connection string.")
+
+    return DatabaseConfig(
+        url=database_url,
+        host=parsed.hostname or "localhost",
+        port=str(parsed.port or 5432),
+        user=unquote(parsed.username or ""),
+        password=unquote(parsed.password or ""),
+        database=parsed.path.lstrip("/") or "postgres",
+    )
+
+
+def load_database_config() -> DatabaseConfig:
+    return parse_database_url(load_database_url())
+
+
+def prepare_backup_file():
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_file = os.path.join(backup_dir, f"database_backup_{timestamp}.sql")
+    return BACKUP_DIR / f"database_backup_{timestamp}.sql"
 
-    # Set environment variable for password
+
+def backup_with_pg_dump(db_config: DatabaseConfig):
+    """Backup database using pg_dump command"""
+    backup_file = prepare_backup_file()
+
     env = os.environ.copy()
-    env['PGPASSWORD'] = DB_PASSWORD
+    env["PGPASSWORD"] = db_config.password
 
-    # Build pg_dump command
     cmd = [
-        'pg_dump',
-        '-h', DB_HOST,
-        '-p', DB_PORT,
-        '-U', DB_USER,
-        '-d', DB_NAME,
-        '--no-owner',
-        '--no-privileges',
-        '--clean',
-        '--if-exists',
-        '-f', backup_file
+        "pg_dump",
+        "-h", db_config.host,
+        "-p", db_config.port,
+        "-U", db_config.user,
+        "-d", db_config.database,
+        "--no-owner",
+        "--no-privileges",
+        "--clean",
+        "--if-exists",
+        "-f", str(backup_file),
     ]
 
     try:
@@ -48,11 +106,11 @@ def backup_with_pg_dump():
         result = subprocess.run(cmd, env=env, capture_output=True, text=True)
 
         if result.returncode == 0:
-            file_size = os.path.getsize(backup_file)
+            file_size = backup_file.stat().st_size
             print(f"✓ Backup completed successfully!")
             print(f"  File: {backup_file}")
             print(f"  Size: {file_size / 1024:.2f} KB")
-            return backup_file
+            return str(backup_file)
         else:
             print(f"✗ Backup failed with error:")
             print(result.stderr)
@@ -64,7 +122,8 @@ def backup_with_pg_dump():
         print(f"✗ Error during backup: {e}")
         return None
 
-def backup_with_python():
+
+def backup_with_python(db_config: DatabaseConfig):
     """Backup database using Python psycopg2"""
     try:
         import psycopg2
@@ -75,36 +134,21 @@ def backup_with_python():
         import psycopg2
         from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
-    # Create backup directory
-    backup_dir = os.path.join(os.path.dirname(__file__), "..", "sql", "backups")
-    os.makedirs(backup_dir, exist_ok=True)
-
-    # Generate backup filename with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_file = os.path.join(backup_dir, f"database_backup_{timestamp}.sql")
+    backup_file = prepare_backup_file()
 
     try:
         print(f"Starting database backup to: {backup_file}")
 
-        # Connect to database
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME
-        )
+        conn = psycopg2.connect(db_config.url)
         conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         cursor = conn.cursor()
 
-        with open(backup_file, 'w') as f:
-            # Write header
+        with backup_file.open("w") as f:
             f.write(f"-- PostgreSQL Database Backup\n")
-            f.write(f"-- Database: {DB_NAME}\n")
+            f.write(f"-- Database: {db_config.database}\n")
             f.write(f"-- Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"-- Generated by Python backup script\n\n")
 
-            # Get all tables
             cursor.execute("""
                 SELECT table_name
                 FROM information_schema.tables
@@ -185,11 +229,11 @@ def backup_with_python():
         cursor.close()
         conn.close()
 
-        file_size = os.path.getsize(backup_file)
+        file_size = backup_file.stat().st_size
         print(f"✓ Backup completed successfully!")
         print(f"  File: {backup_file}")
         print(f"  Size: {file_size / 1024:.2f} KB")
-        return backup_file
+        return str(backup_file)
 
     except Exception as e:
         print(f"✗ Error during backup: {e}")
@@ -197,17 +241,24 @@ def backup_with_python():
         traceback.print_exc()
         return None
 
+
 if __name__ == "__main__":
     print("=" * 60)
     print("PostgreSQL Database Backup Script")
     print("=" * 60)
 
+    try:
+        db_config = load_database_config()
+    except RuntimeError as exc:
+        print(f"✗ {exc}")
+        sys.exit(1)
+
     # Try pg_dump first, fall back to Python method
-    backup_file = backup_with_pg_dump()
+    backup_file = backup_with_pg_dump(db_config)
 
     if not backup_file:
         print("\nTrying Python-based backup method...")
-        backup_file = backup_with_python()
+        backup_file = backup_with_python(db_config)
 
     if backup_file:
         print("\n" + "=" * 60)

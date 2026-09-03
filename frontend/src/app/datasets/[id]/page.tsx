@@ -4,30 +4,25 @@ import { ProtectedRoute } from '@/components/auth/ProtectedRoute';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { useAuth } from '@/components/auth/AuthProvider';
 import { useState, useEffect } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams } from 'next/navigation';
 import { datasetsAPI, dataSharingAPI, organizationsAPI } from '@/lib/api';
-import { createApiClient } from '../../../../unified-api-client';
+import { API_BASE_URL } from '@/lib/api/client';
 import Link from 'next/link';
-import { 
-  Download, 
-  Share2, 
-  Link as LinkIcon, 
-  Eye, 
-  MessageSquare, 
-  Shield, 
-  Copy, 
-  Trash2, 
-  Power, 
+import {
+  Download,
+  Share2,
+  Eye,
+  MessageSquare,
+  Shield,
+  Copy,
+  Power,
   PowerOff,
   ExternalLink,
-  Calendar,
-  Users,
   Database,
   UserCheck,
   Upload,
   Edit,
-  FileText,
-  Sparkles
+  FileText
 } from 'lucide-react';
 
 function formatFileSize(bytes: number): string {
@@ -51,24 +46,13 @@ export default function DatasetDetailPage() {
 function DatasetDetailContent() {
   const { user } = useAuth();
   const params = useParams();
-  const router = useRouter();
   const datasetId = parseInt(params.id as string);
-  
-  // Initialize unified API client
-  const unifiedClient = createApiClient({
-    baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000',
-    token: localStorage.getItem('access_token') || undefined
-  });
-  
+
   const [dataset, setDataset] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [enhancedPreview, setEnhancedPreview] = useState<any>(null);
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
-  const [chatMessage, setChatMessage] = useState('');
-  const [chatResponse, setChatResponse] = useState<any>(null);
-  const [isChatting, setIsChatting] = useState(false);
-  
   // Sharing state
   const [shareLinks, setShareLinks] = useState<any[]>([]);
   const [showCreateShareModal, setShowCreateShareModal] = useState(false);
@@ -295,25 +279,6 @@ function DatasetDetailContent() {
     alert('Share link copied to clipboard!');
   };
 
-  const handleChat = async () => {
-    if (!chatMessage.trim()) return;
-    
-    try {
-      setIsChatting(true);
-      const response = await datasetsAPI.chatWithDataset(datasetId, chatMessage);
-      setChatResponse(response);
-      setChatMessage('');
-    } catch (error: any) {
-      console.error('Chat failed:', error);
-      setChatResponse({
-        error: true,
-        answer: error.response?.data?.detail || 'Failed to connect to chat service'
-      });
-    } finally {
-      setIsChatting(false);
-    }
-  };
-
   const handleTransferOwnership = async () => {
     if (!transferForm.new_owner_id) {
       alert('Please select a new owner');
@@ -538,83 +503,6 @@ function DatasetDetailContent() {
     } catch (err: any) {
       console.error('Download error:', err);
       alert(`Failed to download: ${err.message}`);
-    }
-  };
-
-  const handleDownload = async (format = 'original') => {
-    try {
-      setIsLoading(true);
-
-      const token = localStorage.getItem('access_token');
-      if (!token) {
-        alert('Authentication required. Please log in again.');
-        return;
-      }
-
-      // Step 1: Get download token from the backend
-      const tokenResponse = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/datasets/${datasetId}/download`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-      
-      if (!tokenResponse.ok) {
-        const errorData = await tokenResponse.json().catch(() => null);
-        throw new Error(errorData?.detail?.message || `Failed to initiate download: ${tokenResponse.status}`);
-      }
-      
-      const downloadInfo = await tokenResponse.json();
-      console.log('Download info received:', downloadInfo);
-      
-      if (!downloadInfo.download_token) {
-        throw new Error('No download token received from server');
-      }
-      
-      // Step 2: Use the download token to get the actual file
-      const fileResponse = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/datasets/download/${downloadInfo.download_token}`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-      
-      if (!fileResponse.ok) {
-        const errorData = await fileResponse.json().catch(() => null);
-        throw new Error(errorData?.detail?.message || `Download failed: ${fileResponse.status}`);
-      }
-      
-      // Step 3: Handle the file download
-      const contentType = fileResponse.headers.get('Content-Type');
-      const contentDisposition = fileResponse.headers.get('Content-Disposition');
-      
-      // Extract filename from Content-Disposition header or use dataset name
-      let filename = `${dataset?.name || 'dataset'}.${format === 'original' ? dataset?.type || 'csv' : format}`;
-      if (contentDisposition) {
-        const filenameMatch = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
-        if (filenameMatch && filenameMatch[1]) {
-          filename = filenameMatch[1].replace(/['"]/g, '');
-        }
-      }
-      
-      const blob = await fileResponse.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.style.display = 'none';
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-      
-      console.log('Download completed successfully');
-      
-    } catch (error: any) {
-      console.error('Failed to download dataset:', error);
-      alert(error.message || 'Failed to download dataset');
-    } finally {
-      setIsLoading(false);
     }
   };
 

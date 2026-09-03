@@ -116,18 +116,18 @@ class ConnectorService:
             # Validate connector is active and tested
             if not connector.is_active:
                 raise Exception("Connector is not active")
-            
+
             if connector.test_status != "success":
                 raise Exception("Connector has not been successfully tested")
-            
+
             # Create MindsDB database connection if not exists
             mindsdb_result = await self._create_mindsdb_connection(connector)
             if not mindsdb_result.get("success"):
                 raise Exception(f"Failed to create MindsDB connection: {mindsdb_result.get('error')}")
-            
+
             # Determine dataset type based on connector
             dataset_type = self._get_dataset_type_for_connector(connector.connector_type)
-            
+
             # Determine the correct table name for MindsDB queries
             if connector.connector_type == 'web':
                 # For web connectors, the table name is typically the same as the database name
@@ -135,6 +135,9 @@ class ConnectorService:
                 source_reference = connector.connection_config.get('base_url', '') + connector.connection_config.get('endpoint', '')
             else:
                 # For other connectors, use the provided table_or_query
+                # SECURITY: Validate identifier to prevent SQL injection
+                if not self.mindsdb_service._is_safe_mindsdb_identifier(table_or_query):
+                    raise Exception(f"Invalid table name: '{table_or_query}' contains unsafe characters")
                 mindsdb_table_name = table_or_query
                 source_reference = table_or_query
             
@@ -363,17 +366,22 @@ class ConnectorService:
     async def _get_connector_schema(self, connector: DatabaseConnector, table_name: str) -> Optional[Dict[str, Any]]:
         """Get schema information from connector source"""
         try:
+            # SECURITY: Validate identifier to prevent SQL injection
+            if not self.mindsdb_service._is_safe_mindsdb_identifier(table_name):
+                logger.error(f"Unsafe table name rejected: '{table_name}'")
+                return None
+
             if connector.connector_type in ['mysql', 'postgresql']:
                 # Get table schema using DESCRIBE or INFORMATION_SCHEMA
                 if connector.connector_type == 'mysql':
                     schema_query = f"DESCRIBE {connector.mindsdb_database_name}.{table_name}"
                 else:  # postgresql
                     schema_query = f"""
-                    SELECT column_name, data_type 
-                    FROM {connector.mindsdb_database_name}.information_schema.columns 
+                    SELECT column_name, data_type
+                    FROM {connector.mindsdb_database_name}.information_schema.columns
                     WHERE table_name = '{table_name}'
                     """
-                
+
                 logger.info(f"🔍 Getting schema for {table_name}: {schema_query}")
                 result = self.mindsdb_service.execute_query(schema_query)
                 

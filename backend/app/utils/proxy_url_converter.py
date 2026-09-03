@@ -127,41 +127,8 @@ def _is_url(text: str) -> bool:
         return False
 
 
-def convert_https_to_http(url: str) -> str:
-    """
-    Convert HTTPS URLs to HTTP for local development
-    
-    Args:
-        url: The URL to convert
-        
-    Returns:
-        URL with HTTP scheme
-    """
-    try:
-        if url.startswith('https://'):
-            return url.replace('https://', 'http://', 1)
-        return url
-    except Exception as e:
-        logger.error(f"Error converting HTTPS to HTTP for {url}: {e}")
-        return url
 
 
-def extract_domain_from_url(url: str) -> Optional[str]:
-    """
-    Extract domain from URL
-    
-    Args:
-        url: The URL to extract domain from
-        
-    Returns:
-        Domain string or None if extraction fails
-    """
-    try:
-        parsed = urlparse(url)
-        return parsed.netloc
-    except Exception as e:
-        logger.error(f"Error extracting domain from {url}: {e}")
-        return None
 
 
 def ensure_localhost_proxy_uses_http(url: str) -> str:

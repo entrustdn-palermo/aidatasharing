@@ -9,29 +9,7 @@ import { datasetsAPI, adminAPI } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import Link from 'next/link';
-import { 
-  Settings, 
-  Users, 
-  Database, 
-  Building, 
-  Activity, 
-  Key, 
-  Server, 
-  Shield, 
-  Cloud, 
-  FileText, 
-  Zap,
-  CheckCircle,
-  AlertCircle,
-  XCircle,
-  Edit,
-  Save,
-  X,
-  Plus,
-  Trash2,
-  Eye,
-  EyeOff
-} from 'lucide-react';
+import {Settings, Users, Database, Building, Activity, Key, Server, Shield, Cloud, FileText, Zap, CheckCircle, AlertCircle, XCircle, Edit, Save, X, Eye, EyeOff} from 'lucide-react';
 
 interface AdminStats {
   totalUsers: number;

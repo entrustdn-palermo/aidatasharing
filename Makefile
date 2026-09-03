@@ -1,4 +1,4 @@
-.PHONY: help test test-unit test-integration test-api test-frontend test-all coverage lint format clean install-test-deps
+.PHONY: help test test-unit test-integration test-api test-frontend test-all coverage lint format clean
 
 help:
 	@echo "Available commands:"
@@ -13,11 +13,6 @@ help:
 	@echo "  make lint            - Run code linters"
 	@echo "  make format          - Format code with black and isort"
 	@echo "  make clean           - Remove test artifacts"
-	@echo "  make install-test-deps - Install test dependencies"
-
-# Install test dependencies
-install-test-deps:
-	pip install -r test-requirements.txt
 
 # Run all tests except slow ones
 test:

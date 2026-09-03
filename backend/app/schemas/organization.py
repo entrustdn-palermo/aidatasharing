@@ -51,13 +51,6 @@ class Organization(OrganizationBase):
     model_config = {"from_attributes": True}
 
 
-# User-Organization relationship schemas
-class UserRoleAssignment(BaseModel):
-    user_id: int
-    organization_id: int
-    role: UserRoleEnum
-
-
 class OrganizationMember(BaseModel):
     id: int
     email: str
@@ -68,10 +61,6 @@ class OrganizationMember(BaseModel):
 
     model_config = {"from_attributes": True}
 
-
-class OrganizationInvite(BaseModel):
-    email: str
-    role: UserRoleEnum = UserRoleEnum.MEMBER
 
 
 # Organization selection for registration

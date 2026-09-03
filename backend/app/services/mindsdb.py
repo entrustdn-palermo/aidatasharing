@@ -29,6 +29,7 @@ import time
 import requests
 import pandas as pd
 import io
+import re
 
 # Import for type hints
 from typing import TYPE_CHECKING
@@ -36,6 +37,26 @@ if TYPE_CHECKING:
     from app.models.file_handler import FileUpload
 
 logger = logging.getLogger(__name__)
+
+
+def _records_from_df(df: pd.DataFrame) -> list:
+    """Convert a DataFrame to a list of dicts with numpy types handled."""
+    if df is None or df.empty:
+        return []
+    import numpy as np
+    records = _records_from_df(df)
+    # Convert numpy types in-place
+    def _convert(v):
+        if isinstance(v, (np.integer,)):
+            return int(v)
+        if isinstance(v, (np.floating,)):
+            return float(v)
+        if isinstance(v, np.ndarray):
+            return v.tolist()
+        if isinstance(v, np.bool_):
+            return bool(v)
+        return v
+    return [{k: _convert(v) for k, v in row.items()} for row in records]
 
 
 class MindsDBService:
@@ -79,9 +100,9 @@ class MindsDBService:
             else:
                 logger.error("❌ No API key found - MindsDB agents will not be able to use LLMs")
 
-        # Agent-based configuration
-        self.agent_model = settings.MINDSDB_AGENT_MODEL
-        logger.info(f"🤖 MindsDB Agent model: {self.agent_model}")
+        # Agent creation omits model fields so MindsDB uses its configured default LLM.
+        self.agent_model = settings.MINDSDB_AGENT_MODEL or "mindsdb_default_llm"
+        logger.info(f"🤖 MindsDB Agent model source: {self.agent_model}")
 
         # Connection state
         self.connection = None
@@ -171,7 +192,7 @@ class MindsDBService:
                 if df is not None and hasattr(df, 'empty'):
                     return {
                         "status": "success",
-                        "rows": df.to_dict('records') if not df.empty else [],
+                        "rows": _records_from_df(df) if not df.empty else [],
                         "columns": list(df.columns) if not df.empty else [],
                         "row_count": len(df)
                     }
@@ -272,7 +293,7 @@ class MindsDBService:
                 if df is not None and hasattr(df, 'empty'):
                     return {
                         "status": "success",
-                        "rows": df.to_dict('records') if not df.empty else [],
+                        "rows": _records_from_df(df) if not df.empty else [],
                         "columns": list(df.columns) if not df.empty else [],
                         "row_count": len(df)
                     }
@@ -479,7 +500,7 @@ class MindsDBService:
                         "success": True,
                         "rows_retrieved": len(df),
                         "columns": list(df.columns),
-                        "sample_data": df.head(3).to_dict('records'),
+                        "sample_data": _records_from_df(df.head(3)),
                         "table_name": table_name
                     }
                 else:
@@ -547,7 +568,7 @@ class MindsDBService:
             if test_result and hasattr(test_result, 'fetch'):
                 df = test_result.fetch()
                 if not df.empty:
-                    sample_data = df.head(5).to_dict('records')
+                    sample_data = _records_from_df(df.head(5))
                     columns = list(df.columns)
                     
                     # Try to get total row count
@@ -711,7 +732,7 @@ class MindsDBService:
                                 "table_name": clean_table,
                                 "rows_retrieved": len(df),
                                 "columns": list(df.columns),
-                                "sample_data": df.head(3).to_dict('records')
+                                "sample_data": _records_from_df(df.head(3))
                             }
                 except Exception as table_error:
                     logger.debug(f"Table '{clean_table}' not found: {table_error}")
@@ -934,9 +955,47 @@ class MindsDBService:
             db_session.rollback()
             return {"success": False, "error": str(e)}
     
+    def _is_safe_mindsdb_identifier(self, identifier: Optional[str]) -> bool:
+        if not identifier:
+            return False
+        return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier))
+
+    def _load_mindsdb_table_for_visualization(self, dataset, limit: int = 10000) -> Optional[pd.DataFrame]:
+        database_name = getattr(dataset, "mindsdb_database", None)
+        table_name = getattr(dataset, "mindsdb_table_name", None)
+        if not database_name or not table_name:
+            return None
+
+        if not self._is_safe_mindsdb_identifier(database_name) or not self._is_safe_mindsdb_identifier(table_name):
+            logger.warning(f"Unsafe MindsDB identifier for dataset {dataset.id}: {database_name}.{table_name}")
+            return None
+
+        if not self._ensure_connection():
+            logger.warning(f"MindsDB connection unavailable for dataset {dataset.id} visualization")
+            return None
+
+        query = f"SELECT * FROM {database_name}.{table_name} LIMIT {max(1, min(limit, 10000))}"
+        logger.info(f"📊 Loading connector-backed dataset for visualization: {database_name}.{table_name}")
+        result = self.connection.query(query)
+        if not result or not hasattr(result, "fetch"):
+            logger.warning(f"MindsDB query returned no fetchable result for dataset {dataset.id}")
+            return None
+
+        df = result.fetch()
+        if df is None or not hasattr(df, "empty"):
+            logger.warning(f"MindsDB query returned non-DataFrame result for dataset {dataset.id}")
+            return None
+        if len(df) > limit:
+            df = df.head(limit)
+        return df
+
     async def _load_dataset_for_visualization(self, dataset, db) -> Optional[pd.DataFrame]:
         """Load dataset data into a DataFrame for visualization (async)"""
         try:
+            connector_df = self._load_mindsdb_table_for_visualization(dataset)
+            if connector_df is not None:
+                return connector_df
+
             # Check if dataset has files
             file_path = None
             if dataset.is_multi_file_dataset:
@@ -1067,6 +1126,25 @@ class MindsDBService:
     # ============================================================
 
 
+    def _create_agent_with_default_llm(self, agent_name: str, tables: List[str], prompt_template: str):
+        payload = {
+            "agent": {
+                "name": agent_name,
+                "data": {"tables": tables},
+                "prompt_template": prompt_template,
+                "params": {}
+            }
+        }
+        response = requests.post(
+            f"{self.base_url}/api/projects/mindsdb/agents",
+            json=payload,
+            timeout=120
+        )
+        if response.status_code == 409:
+            return self.connection.agents.get(agent_name)
+        response.raise_for_status()
+        return self.connection.agents.get(agent_name)
+
     def create_or_get_agent(self, agent_name: str, tables: List[str], prompt_template: str,
                            model_config: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -1102,15 +1180,13 @@ class MindsDBService:
             except Exception as e:
                 logger.info(f"Agent {agent_name} not found, creating new one...")
 
-            # Create new agent using MindsDB's pre-configured LLM
-            # Don't pass model config - let MindsDB use its default configured LLM (OpenAI-based)
             logger.info(f"🤖 Creating agent '{agent_name}' with {len(tables)} tables")
-            logger.info(f"📡 Using MindsDB's pre-configured LLM (OpenAI-based URL)")
+            logger.info("📡 Using MindsDB default LLM configuration")
             logger.debug(f"Agent tables: {tables}")
 
-            agent = self.connection.agents.create(
-                name=agent_name,
-                data={'tables': tables},
+            agent = self._create_agent_with_default_llm(
+                agent_name=agent_name,
+                tables=tables,
                 prompt_template=prompt_template
             )
 
@@ -1190,6 +1266,22 @@ class MindsDBService:
             logger.error(f"❌ Failed to delete agent {agent_name}: {e}")
             return False
 
+    def clear_dataset_agent_metadata(self, dataset, db) -> None:
+        dataset.agent_name = None
+        dataset.agent_created_at = None
+        dataset.agent_last_updated = None
+        db.commit()
+
+    def delete_dataset_agent(self, dataset, db) -> bool:
+        agent_name = getattr(dataset, "agent_name", None)
+        if not agent_name:
+            return True
+
+        deleted = self.delete_agent(agent_name)
+        if deleted:
+            self.clear_dataset_agent_metadata(dataset, db)
+        return deleted
+
     def list_agents(self) -> List[str]:
         """
         List all available agents in MindsDB.
@@ -1250,7 +1342,7 @@ class MindsDBService:
                 FileUpload.dataset_id == dataset.id
             ).first()
 
-            # Try to create connector either from FileUpload or directly from dataset
+            # Try to create connector either from FileUpload, connector metadata, or directly from dataset
             connector_result = None
             database_name = None
             table_name = "data"
@@ -1259,6 +1351,13 @@ class MindsDBService:
                 # Use existing FileUpload record
                 logger.info(f"📁 Using FileUpload record for dataset {dataset.id}")
                 connector_result = self.create_file_database_connector(file_upload)
+            elif dataset.connector_id and dataset.mindsdb_database and dataset.mindsdb_table_name:
+                logger.info(f"🔌 Using connector-backed MindsDB table for dataset {dataset.id}")
+                connector_result = {
+                    "success": True,
+                    "database_name": dataset.mindsdb_database,
+                    "test_result": {"table_name": dataset.mindsdb_table_name}
+                }
             elif dataset.file_path or dataset.source_url:
                 # Try to create connector directly from dataset file_path
                 logger.info(f"📁 Creating connector from dataset file_path for dataset {dataset.id}")
@@ -1309,9 +1408,10 @@ class MindsDBService:
                         logger.warning(f"Could not create connector from dataset file: {e}")
 
             if not connector_result or not connector_result.get("success"):
+                connector_error = connector_result.get("error") if connector_result else None
                 return {
                     "success": False,
-                    "error": "No valid file upload or file path found for dataset, or dataset is not a data file (e.g., image)"
+                    "error": connector_error or "No valid file upload or file path found for dataset, or dataset is not a data file (e.g., image)"
                 }
 
             database_name = connector_result["database_name"]
@@ -1746,6 +1846,17 @@ This is a multi-file dataset - USE ALL AVAILABLE FILES to provide comprehensive 
             if not agent_result.get("success"):
                 error_msg = f"Agent setup failed: {agent_result.get('error')}"
                 logger.error(error_msg)
+                fallback_response = await self._chat_with_dataset_summary_fallback(
+                    dataset=dataset,
+                    message=message,
+                    db=db,
+                    start_time=start_time,
+                    visualizations=visualizations,
+                    data_analysis=data_analysis
+                )
+                if fallback_response.get("success"):
+                    fallback_response["agent_error"] = error_msg
+                    return fallback_response
                 return {
                     "success": False,
                     "error": error_msg,
@@ -1844,7 +1955,7 @@ This is a multi-file dataset - USE ALL AVAILABLE FILES to provide comprehensive 
                                     last_answer = parts[-1].strip()
 
                     # Use the clean answer if found, otherwise use full response
-                    final_answer = last_answer if last_answer else full_response
+                    final_answer = self._clean_agent_answer(last_answer if last_answer else full_response)
 
                     logger.info(f"✅ Agent response complete in {response_time:.2f}s")
                     logger.info(f"📝 Extracted answer length: {len(final_answer)} chars")
@@ -1875,6 +1986,7 @@ This is a multi-file dataset - USE ALL AVAILABLE FILES to provide comprehensive 
             try:
                 completion = agent.completion(conversation)
                 answer = completion.get('answer', '') if isinstance(completion, dict) else str(completion)
+                answer = self._clean_agent_answer(answer)
 
                 response_time = time.time() - start_time
 
@@ -1911,6 +2023,126 @@ This is a multi-file dataset - USE ALL AVAILABLE FILES to provide comprehensive 
                 "error": str(e),
                 "message": "Chat with dataset agent failed. Please ensure MindsDB is properly configured."
             }
+
+    def _clean_agent_answer(self, answer: str) -> str:
+        if not answer:
+            return answer
+
+        import re
+
+        cleaned = re.sub(r"\{'type':\s*'end'[^}]*\}", "", answer).strip()
+        markers = [
+            "Executing final SQL query:",
+            "Final Answer:",
+            "Answer:",
+        ]
+        for marker in markers:
+            if marker in cleaned:
+                cleaned = cleaned.split(marker)[-1].strip()
+                break
+
+        if "|" in cleaned:
+            table_start = cleaned.find("|")
+            if table_start >= 0:
+                cleaned = cleaned[table_start:].strip()
+
+        return cleaned or answer
+
+    async def _chat_with_dataset_summary_fallback(
+        self,
+        dataset,
+        message: str,
+        db,
+        start_time: float,
+        visualizations: Optional[List[Dict[str, Any]]] = None,
+        data_analysis: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        try:
+            dataset_df = await self._load_dataset_for_visualization(dataset, db)
+            if dataset_df is None or dataset_df.empty:
+                return {"success": False, "error": "Dataset data could not be loaded for fallback chat"}
+
+            from app.services.data_visualization import get_visualization_service, sanitize_visualization_payload
+
+            visualizations = visualizations or []
+            data_analysis = data_analysis or {}
+            if not data_analysis:
+                viz_service = get_visualization_service(self.api_key)
+                data_analysis = viz_service.analyze_dataset(dataset_df, dataset.name)
+                data_analysis = sanitize_visualization_payload(data_analysis)
+
+            answer = self._build_dataset_summary_answer(dataset, message, dataset_df, data_analysis)
+            return {
+                "success": True,
+                "answer": answer,
+                "source": "dataset_summary_fallback",
+                "agent_name": "Anton",
+                "dataset_type": "multi_file" if dataset.is_multi_file_dataset else "single_file",
+                "response_time": time.time() - start_time,
+                "streaming": False,
+                "model": self.agent_model,
+                "visualizations": visualizations,
+                "data_analysis": data_analysis,
+                "has_visualizations": len(visualizations) > 0
+            }
+        except Exception as e:
+            logger.error(f"❌ Dataset summary fallback failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _build_dataset_summary_answer(self, dataset, message: str, dataset_df: pd.DataFrame, data_analysis: Dict[str, Any]) -> str:
+        basic_stats = data_analysis.get("basic_stats", {})
+        data_quality = data_analysis.get("data_quality", {})
+        correlations = data_analysis.get("correlations", {})
+        column_analysis = data_analysis.get("column_analysis", {})
+        recommendations = data_analysis.get("recommendations", [])
+        message_lower = message.lower()
+
+        lines = [
+            f'I analyzed the shared dataset "{dataset.name}".',
+            "",
+            "Dataset summary:",
+            f"- Rows: {basic_stats.get('rows', 'unknown')}",
+            f"- Columns: {basic_stats.get('columns', 'unknown')}",
+        ]
+
+        missing_values = data_quality.get("missing_values", {})
+        if missing_values:
+            total_missing = sum(value for value in missing_values.values() if isinstance(value, (int, float)))
+            lines.append(f"- Missing values: {total_missing}")
+
+        group_columns = [column for column in dataset_df.columns if column.lower() in message_lower]
+        numeric_columns = dataset_df.select_dtypes(include=["number"]).columns.tolist()
+        requested_numeric = next((column for column in numeric_columns if column.lower() in message_lower), None)
+        if requested_numeric and group_columns:
+            group_column = next((column for column in group_columns if column != requested_numeric), group_columns[0])
+            grouped = dataset_df.groupby(group_column)[requested_numeric].sum().sort_values(ascending=False).head(10)
+            lines.extend(["", f"{requested_numeric} by {group_column}:"])
+            lines.extend(f"- {group}: {value:g}" for group, value in grouped.items())
+
+        numeric_summaries = []
+        for column, stats in column_analysis.items():
+            if isinstance(stats, dict) and "mean" in stats:
+                numeric_summaries.append(
+                    f"- {column}: mean {stats.get('mean')}, min {stats.get('min')}, max {stats.get('max')}"
+                )
+        if numeric_summaries:
+            lines.extend(["", "Numeric highlights:", *numeric_summaries[:5]])
+
+        strong_correlations = correlations.get("strong_correlations", [])
+        if strong_correlations:
+            lines.append("")
+            lines.append("Strong correlations:")
+            for correlation in strong_correlations[:5]:
+                lines.append(
+                    f"- {correlation.get('column1')} and {correlation.get('column2')}: {correlation.get('correlation')}"
+                )
+
+        if recommendations:
+            lines.append("")
+            lines.append("Recommendations:")
+            lines.extend(f"- {recommendation}" for recommendation in recommendations[:5])
+
+        return "\n".join(lines)
 
 
 # Global service instance

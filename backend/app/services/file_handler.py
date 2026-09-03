@@ -7,7 +7,7 @@ Enhanced with permanent storage capabilities
 import os
 import hashlib
 import mimetypes
-from typing import Dict, List, Optional, Any, BinaryIO
+from typing import Dict, List, Optional, Any
 from sqlalchemy.orm import Session
 from fastapi import UploadFile
 import logging
@@ -41,10 +41,6 @@ class FileHandlerService:
         self.image_service = ImageProcessingService(db)
         self.pdf_service = PDFProcessingService(db)
         self.universal_processor = UniversalFileProcessor(db)
-        
-        # Legacy local storage setup (for backward compatibility)
-        self.upload_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
-        os.makedirs(self.upload_dir, exist_ok=True)
     
     def calculate_file_hash(self, file_content: bytes) -> str:
         """Calculate SHA-256 hash of file content"""
@@ -83,92 +79,13 @@ class FileHandlerService:
         return FileType.OTHER.value
     
     async def save_uploaded_file(self, file: UploadFile, user: User, dataset: Dataset) -> FileUpload:
-        """Save uploaded file using permanent storage or legacy local storage"""
+        """Save uploaded file via universal processor"""
         try:
-            # Determine file type
-            mime_type = self.get_file_mime_type(file.filename)
-            file_type = self.determine_file_type(file.filename, mime_type)
-            
-            # Use universal processor for all file types
             logger.info(f"Processing file with universal processor: {file.filename}")
             return await self.universal_processor.process_file(file, user, dataset)
-            
-            # Handle other file types with existing logic
-            if self.use_permanent_storage:
-                # Use permanent storage
-                logger.info(f"Using MindsDB permanent storage for file: {file.filename}")
-                result = self.permanent_service.upload_file_to_permanent_storage(file, user, dataset)
-                
-                if result["success"]:
-                    # Get the created file upload record
-                    file_upload = self.db.query(FileUpload).filter(
-                        FileUpload.mindsdb_file_id == result["mindsdb_file_id"]
-                    ).first()
-                    
-                    if file_upload:
-                        # Update file type
-                        file_upload.file_type = file_type
-                        self.db.commit()
-                        logger.info(f"File uploaded to permanent storage successfully: {file.filename}")
-                        return file_upload
-                    else:
-                        raise Exception("File upload record not found after permanent storage upload")
-                else:
-                    raise Exception(f"Permanent storage upload failed: {result.get('error')}")
-            else:
-                # Use legacy local storage
-                logger.info(f"Using legacy local storage for file: {file.filename}")
-                return self._save_uploaded_file_local(file, user, dataset, file_type)
-                
         except Exception as e:
             logger.error(f"File upload failed: {str(e)}")
             raise
-    
-    def _save_uploaded_file_local(self, file: UploadFile, user: User, dataset: Dataset, file_type: str) -> FileUpload:
-        """Save uploaded file to local storage (legacy method)"""
-        # Read file content
-        file_content = file.file.read()
-        file_size = len(file_content)
-        file_hash = self.calculate_file_hash(file_content)
-        
-        # Generate unique filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_filename = f"{timestamp}_{user.id}_{file.filename}"
-        file_path = os.path.join(self.upload_dir, safe_filename)
-        
-        # Save file to disk
-        with open(file_path, "wb") as f:
-            f.write(file_content)
-        
-        # Create tracking record
-        file_upload = FileUpload(
-            dataset_id=dataset.id,
-            user_id=user.id,
-            organization_id=user.organization_id,
-            original_filename=file.filename,
-            file_path=file_path,
-            file_size=file_size,
-            file_hash=file_hash,
-            mime_type=self.get_file_mime_type(file.filename),
-            file_type=file_type,
-            upload_status=UploadStatus.UPLOADED
-        )
-        
-        self.db.add(file_upload)
-        self.db.commit()
-        self.db.refresh(file_upload)
-        
-        # Log the upload
-        self.log_processing_step(
-            file_upload.id,
-            "file_upload",
-            "completed",
-            f"File uploaded successfully to local storage: {file.filename}",
-            {"file_size": file_size, "file_hash": file_hash}
-        )
-        
-        logger.info(f"File uploaded to local storage: {file.filename} -> {safe_filename}")
-        return file_upload
     
     def process_file_with_mindsdb(self, file_upload: FileUpload) -> Dict[str, Any]:
         """Process uploaded file with MindsDB (supports both permanent and local storage)"""

@@ -1,5 +1,6 @@
 # Database models - Import all models to ensure they are registered with SQLAlchemy
 
+from app.core.database import Base
 from .user import User
 from .organization import Organization, OrganizationType, DataSharingLevel, UserRole
 from .config import Configuration
@@ -24,6 +25,9 @@ from .admin_config import (
 )
 
 __all__ = [
+    # SQLAlchemy base
+    "Base",
+
     # User models
     "User",
     

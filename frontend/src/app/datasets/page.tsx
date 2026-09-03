@@ -7,6 +7,7 @@ import { useAuth } from '@/components/auth/AuthProvider';
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { datasetsAPI } from '@/lib/api';
+import { API_BASE_URL } from '@/lib/api/client';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 
@@ -110,40 +111,13 @@ function DatasetsContent() {
         throw new Error('No download token received from server');
       }
       
-      // Step 2: Use the download token to get the actual file
-      const fileResponse = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/datasets/download/${downloadInfo.download_token}`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-      
-      if (!fileResponse.ok) {
-        const errorData = await fileResponse.json().catch(() => null);
-        throw new Error(errorData?.detail?.message || `Download failed: ${fileResponse.status}`);
-      }
-      
-      // Step 3: Handle the file download
-      const contentDisposition = fileResponse.headers.get('Content-Disposition');
-      
-      // Extract filename from Content-Disposition header or use dataset name
-      let filename = `${datasetName}.${datasetType || 'csv'}`;
-      if (contentDisposition) {
-        const filenameMatch = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
-        if (filenameMatch && filenameMatch[1]) {
-          filename = filenameMatch[1].replace(/['"]/g, '');
-        }
-      }
-      
-      const blob = await fileResponse.blob();
-      const url = window.URL.createObjectURL(blob);
+      const downloadUrl = `${API_BASE_URL}/api/datasets/download/${downloadInfo.download_token}`;
       const a = document.createElement('a');
       a.style.display = 'none';
-      a.href = url;
-      a.download = filename;
+      a.href = downloadUrl;
+      a.download = `${datasetName}.${datasetType || 'csv'}`;
       document.body.appendChild(a);
       a.click();
-      window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
       
     } catch (error: any) {

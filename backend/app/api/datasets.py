@@ -1,3 +1,4 @@
+import re
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Body
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -8,10 +9,26 @@ from app.core.database import get_db
 from app.core.auth import get_current_user
 from app.models.user import User
 from app.models.dataset import Dataset, DatasetType, DatasetStatus, AIProcessingStatus, DatabaseConnector
+
+
+def _sanitize_filename(filename: str, default: str = "download") -> str:
+    """Sanitize a filename for use in Content-Disposition headers.
+    Strips path separators, control characters, and limits length.
+    """
+    if not filename:
+        return default
+    # Remove path separators
+    filename = filename.replace("/", "_").replace("\\", "_")
+    # Remove control characters and non-printable chars
+    filename = re.sub(r'[\x00-\x1f\x7f-\x9f"]', "", filename)
+    # Limit length
+    if len(filename) > 255:
+        name, ext = filename.rsplit(".", 1) if "." in filename else (filename, "")
+        filename = name[:250] + ("." + ext if ext else "")
+    return filename or default
 from app.models.organization import DataSharingLevel
 from app.schemas.dataset import (
-    DatasetCreate, DatasetUpdate, DatasetResponse, 
-    DatasetUpload, DatasetStats, DatasetAccessLog
+    DatasetCreate, DatasetUpdate, DatasetResponse, DatasetAccessLog
 )
 from app.services.data_sharing import DataSharingService
 from app.services.mindsdb import mindsdb_service
@@ -91,33 +108,15 @@ async def get_datasets(
         user=current_user,
         sharing_level=sharing_level,
         include_inactive=include_inactive,
-        include_deleted=include_deleted
+        include_deleted=include_deleted,
+        dataset_type=dataset_type,
+        skip=skip,
+        limit=limit
     )
-    
-    logger.info(f"DataSharingService returned {len(datasets)} datasets")
-    
-    # Filter out deleted datasets unless explicitly requested
-    if not include_deleted:
-        original_count = len(datasets)
-        datasets = [d for d in datasets if not d.is_deleted]
-        filtered_count = len(datasets)
-        logger.info(f"Filtered out deleted datasets: {original_count} -> {filtered_count}")
-    
-    # Apply additional filters
-    filtered_datasets = []
-    for dataset in datasets:
-        # Filter by type if specified
-        if dataset_type and dataset.type != dataset_type:
-            continue
-        filtered_datasets.append(dataset)
-    
-    logger.info(f"Final result: {len(filtered_datasets)} datasets after all filtering")
-    
-    # Apply pagination
-    result = filtered_datasets[skip:skip + limit]
-    logger.info(f"Returning {len(result)} datasets after pagination (skip={skip}, limit={limit})")
-    
-    return result
+
+    logger.info(f"Returning {len(datasets)} datasets after SQL filtering and pagination")
+
+    return datasets
 
 @router.post("/", response_model=DatasetResponse, status_code=201)
 async def create_dataset(
@@ -311,7 +310,6 @@ async def get_dataset(
     logger.info(f"📤 Returning dataset {dataset_id} with {len(dataset_files)} files to user {current_user.id}")
     return dataset_dict
 
-@router.put("/{dataset_id}", response_model=DatasetResponse)
 @router.put("/{dataset_id}/metadata", response_model=DatasetResponse)
 async def update_dataset_metadata(
     dataset_id: int,
@@ -335,9 +333,9 @@ async def update_dataset_metadata(
             detail="Access denied to this dataset"
         )
     
-    # Only owner or admin can update metadata
+    # Only owner, superuser, or same-organization admin/owner can update metadata
     if dataset.owner_id != current_user.id and not current_user.is_superuser:
-        if current_user.role not in ["owner", "admin"]:
+        if current_user.organization_id != dataset.organization_id or current_user.role not in ["owner", "admin"]:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only dataset owner or organization admin can update metadata"
@@ -347,7 +345,7 @@ async def update_dataset_metadata(
     allowed_fields = [
         'name', 'description', 'schema_info', 'file_metadata', 'content_preview',
         'ai_summary', 'ai_insights', 'ai_recommendations', 'sharing_level',
-        'public_share_enabled', 'ai_chat_enabled', 'allow_download'
+        'ai_chat_enabled', 'allow_download'
     ]
     
     updated_fields = []
@@ -618,9 +616,9 @@ async def update_dataset(
             detail="Dataset not found"
         )
     
-    # Only owner or org admin can update
+    # Only owner, superuser, or same-organization admin/owner can update
     if dataset.owner_id != current_user.id and not current_user.is_superuser:
-        if current_user.role not in ["owner", "admin"]:
+        if current_user.organization_id != dataset.organization_id or current_user.role not in ["owner", "admin"]:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only dataset owner or organization admin can update"
@@ -685,8 +683,9 @@ async def delete_dataset(
     # Clean up associated MindsDB agents first
     try:
         if dataset.agent_name:
-            mindsdb_service.delete_agent(dataset.agent_name)
-            logger.info(f"Agent {dataset.agent_name} deleted")
+            agent_name = dataset.agent_name
+            if mindsdb_service.delete_dataset_agent(dataset, db):
+                logger.info(f"Agent {agent_name} deleted")
     except Exception as e:
         logger.warning(f"Agent cleanup failed: {e}")
 
@@ -1221,7 +1220,7 @@ async def upload_dataset_file(
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_extension}") as temp_file:
             temp_file.write(content)
             temp_file_path = temp_file.name
-        
+
         # Process different file types
         if file_extension in ["pdf", "json"]:
             try:
@@ -1229,18 +1228,18 @@ async def upload_dataset_file(
                 if content_result.get("success"):
                     file_metadata = content_result.get("metadata", {})
                     content_preview = content_result["content"][:500] + "..." if len(content_result["content"]) > 500 else content_result["content"]
-                    
+
                     # Extract counts for metadata
                     if file_extension == "json":
                         row_count = file_metadata.get("element_count")
                         column_count = 1  # JSON treated as single complex column
-                        
+
                         # Generate enhanced metadata for JSON
                         try:
                             import json as json_module
                             with open(temp_file_path, 'r', encoding='utf-8') as f:
                                 json_data = json_module.load(f)
-                            
+
                             # Enhanced schema metadata for JSON
                             schema_metadata = {
                                 'file_type': 'json',
@@ -1255,7 +1254,7 @@ async def upload_dataset_file(
                                 'data_types': _analyze_json_types(json_data),
                                 'sample_data': str(json_data)[:200] + "..." if len(str(json_data)) > 200 else str(json_data)
                             }
-                            
+
                             # Enhanced quality metrics for JSON
                             quality_metrics = {
                                 'overall_score': 95,  # JSON files are typically well-structured
@@ -1265,7 +1264,7 @@ async def upload_dataset_file(
                                 'issues': [],
                                 'last_analyzed': datetime.utcnow().isoformat()
                             }
-                            
+
                             # Enhanced preview data for JSON
                             preview_data = {
                                 'type': 'json',
@@ -1274,18 +1273,18 @@ async def upload_dataset_file(
                                 'is_sample': len(str(json_data)) > 500,
                                 'preview_generated_at': datetime.utcnow().isoformat()
                             }
-                            
+
                         except Exception as json_e:
                             logger.warning(f"Could not generate enhanced JSON metadata: {json_e}")
                             # Fallback metadata
                             schema_metadata = {'file_type': 'json', 'error': 'Could not parse JSON structure'}
                             quality_metrics = {'overall_score': 50, 'issues': ['JSON parsing failed']}
                             preview_data = {'type': 'json', 'error': 'Preview generation failed'}
-                    
+
                     logger.info(f"Successfully processed {file_extension} file: {file_metadata}")
             except Exception as e:
                 logger.warning(f"Could not process {file_extension} file content: {e}")
-        
+
         # For CSV files, try to get basic info
         elif file_extension == "csv":
             try:
@@ -1303,11 +1302,11 @@ async def upload_dataset_file(
                 logger.info(f"Successfully analyzed CSV file: {file_metadata}")
             except Exception as e:
                 logger.warning(f"Could not analyze CSV file: {e}")
-    
-    finally:
-        # Clean up temporary file
+    except Exception:
+        # Clean up temp file on processing failure before re-raising
         if temp_file_path and os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
+        raise
 
     # Generate enhanced metadata for files that haven't been processed yet
     # (CSV files and JSON files are already processed above)
@@ -1383,12 +1382,16 @@ async def upload_dataset_file(
     db.commit()
     db.refresh(db_dataset)
 
+    # Clean up temporary file after DB transaction completes successfully
+    if temp_file_path and os.path.exists(temp_file_path):
+        os.unlink(temp_file_path)
+
     # No longer creating ML models automatically - agent-based chat works directly with files
     # Agent-based architecture uses MindsDB agents that query files directly via databases
     logger.info(f"✅ Dataset {db_dataset.id} created successfully. Agent-based chat will handle queries on-demand.")
     
-    # Automatically create share link if sharing level is not private
-    if sharing_level_enum != DataSharingLevel.PRIVATE:
+    # Automatically create public share links only for explicitly public datasets
+    if sharing_level_enum == DataSharingLevel.PUBLIC:
         try:
             from app.services.data_sharing import DataSharingService
             sharing_service = DataSharingService(db)
@@ -1475,9 +1478,7 @@ async def download_all_files(
 
     # Check permissions using data sharing service
     data_sharing_service = DataSharingService(db)
-    has_access = data_sharing_service.can_access_dataset(current_user, dataset)
-
-    if not has_access:
+    if not data_sharing_service.can_download_dataset(current_user, dataset):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You don't have permission to download this dataset"
@@ -1531,7 +1532,8 @@ async def download_all_files(
 
             # Set proper filename (handle both DatasetFile.filename and FileUpload.original_filename)
             filename = getattr(single_file, 'filename', None) or getattr(single_file, 'original_filename', 'download')
-            file_response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+            safe_filename = _sanitize_filename(filename)
+            file_response.headers["Content-Disposition"] = f'attachment; filename="{safe_filename}"'
 
             # Update dataset download statistics
             dataset.download_count = (dataset.download_count or 0) + 1
@@ -1626,9 +1628,7 @@ async def download_individual_file(
 
     # Check permissions using data sharing service
     data_sharing_service = DataSharingService(db)
-    has_access = data_sharing_service.can_access_dataset(current_user, dataset)
-
-    if not has_access:
+    if not data_sharing_service.can_download_dataset(current_user, dataset):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You don't have permission to download this file"
@@ -1670,7 +1670,8 @@ async def download_individual_file(
         file_response = await storage_service.get_file_stream(dataset_file.file_path)
 
         # Set proper filename
-        file_response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        safe_filename = _sanitize_filename(filename)
+        file_response.headers["Content-Disposition"] = f'attachment; filename="{safe_filename}"'
 
         # Update dataset download statistics
         dataset.download_count = (dataset.download_count or 0) + 1
@@ -1937,6 +1938,12 @@ async def chat_with_dataset(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied to this dataset"
+        )
+
+    if not dataset.ai_chat_enabled or not dataset.allow_ai_chat:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Chat is disabled for this dataset"
         )
 
     # Extract message and agent preference

@@ -311,7 +311,6 @@ app.include_router(data_connectors.router, prefix="/api/connectors", tags=["data
 app.include_router(environment.router, prefix="/api/admin/environment", tags=["admin"])
 app.include_router(llm_configurations.router, prefix="/api/llm-configs", tags=["llm-configurations"])
 app.include_router(proxy_connectors.router, prefix="/api/proxy-connectors", tags=["proxy-connectors"])
-# app.include_router(integrated_proxy.router, prefix="/api/proxy", tags=["integrated-proxy"])  # Archived
 app.include_router(gateway.router, prefix="/api/gateway", tags=["gateway"])
 app.include_router(storage_management.router, prefix="/api/admin/storage", tags=["admin"])
 

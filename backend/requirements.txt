@@ -42,8 +42,7 @@ clickhouse-driver==0.2.9
 google-generativeai==0.8.3
 openai==1.91.0
 dspy-ai==2.4.9
-# MindsDB SDK - upgraded for better async support and stability
-mindsdb-sdk>=3.4.8
+mindsdb-sdk>=3.5.0
 
 # Data visualization and analysis
 lida==0.0.13

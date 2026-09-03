@@ -573,17 +573,25 @@ async def delete_connector(
     disabled_sharing_count = 0
     disabled_proxy_count = 0
     
+    mindsdb_service = MindsDBService()
+
     for dataset in affected_datasets:
+        if dataset.agent_name:
+            try:
+                mindsdb_service.delete_dataset_agent(dataset, db)
+                logger.info(f"Deleted agent for dataset {dataset.id} due to connector deletion")
+            except Exception as e:
+                logger.warning(f"Failed to delete agent for dataset {dataset.id}: {e}")
+
         # Disable sharing if enabled
         if dataset.public_share_enabled:
             dataset.public_share_enabled = False
             dataset.share_token = None
-            dataset.share_expires_at = None
             dataset.share_password = None
             dataset.ai_chat_enabled = False
             disabled_sharing_count += 1
             logger.info(f"Disabled sharing for dataset {dataset.id} due to connector deletion")
-        
+
         # Disable related proxy connectors
         try:
             from app.models.proxy_connector import ProxyConnector

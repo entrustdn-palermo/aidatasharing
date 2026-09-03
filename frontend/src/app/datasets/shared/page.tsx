@@ -7,21 +7,7 @@ import { useState, useEffect } from 'react';
 import { dataSharingAPI } from '@/lib/api';
 import { SharingLevelBadge } from '@/components/datasets/SharingLevelSelector';
 import Link from 'next/link';
-import { 
-  Share2, 
-  Copy, 
-  ExternalLink, 
-  Clock, 
-  Eye, 
-  Shield, 
-  PowerOff, 
-  Trash2,
-  Calendar,
-  Users,
-  MessageSquare,
-  Download,
-  BarChart3
-} from 'lucide-react';
+import {Share2, Copy, ExternalLink, Eye, Shield, PowerOff, Calendar, Users, MessageSquare} from 'lucide-react';
 
 interface SharedDataset {
   id: number;

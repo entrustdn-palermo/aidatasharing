@@ -64,17 +64,15 @@ async def upload_file(
         )
     
     # Check file size (100MB limit)
+    max_file_size = 100 * 1024 * 1024
     file_size = 0
-    file_content = await file.read()
-    file_size = len(file_content)
-    
-    if file_size > 100 * 1024 * 1024:  # 100MB
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="File size exceeds 100MB limit"
-        )
-    
-    # Reset file pointer
+    while chunk := await file.read(1024 * 1024):
+        file_size += len(chunk)
+        if file_size > max_file_size:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="File size exceeds 100MB limit"
+            )
     await file.seek(0)
     
     try:

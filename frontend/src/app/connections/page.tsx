@@ -4,23 +4,7 @@ import { useState, useEffect } from 'react';
 import { ProtectedRoute } from '@/components/auth/ProtectedRoute';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { dataConnectorsAPI } from '@/lib/api';
-import { 
-  Database, 
-  Plus, 
-  TestTube, 
-  CheckCircle, 
-  XCircle, 
-  Clock,
-  Settings,
-  Trash2,
-  Wifi,
-  WifiOff,
-  RefreshCw,
-  AlertCircle,
-  Eye,
-  EyeOff,
-  Sparkles
-} from 'lucide-react';
+import {Database, Plus, TestTube, CheckCircle, XCircle, Clock, Settings, Trash2, Wifi, WifiOff, RefreshCw, Eye, EyeOff, Sparkles} from 'lucide-react';
 import SimplifiedConnectorForm from '@/components/connectors/SimplifiedConnectorForm';
 import { parseConnectionUrl } from '@/utils/connectionParser';
 

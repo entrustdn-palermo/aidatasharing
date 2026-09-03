@@ -3,48 +3,47 @@
 # Stop MindsDB Server
 echo "🛑 Stopping MindsDB server..."
 
-# Check if PID file exists
+PIDS=""
+
 if [ -f /tmp/mindsdb.pid ]; then
-    MINDSDB_PID=$(cat /tmp/mindsdb.pid)
-    
-    # Check if process is running
-    if kill -0 $MINDSDB_PID 2>/dev/null; then
-        echo "Found MindsDB process with PID $MINDSDB_PID, stopping..."
-        kill $MINDSDB_PID
-        
-        # Wait for process to stop
-        sleep 2
-        
-        # Check if process stopped
-        if kill -0 $MINDSDB_PID 2>/dev/null; then
-            echo "Process still running, forcing stop..."
-            kill -9 $MINDSDB_PID
-        fi
-        
-        echo "✅ MindsDB server stopped"
-        rm /tmp/mindsdb.pid
-    else
-        echo "⚠️  MindsDB process not running"
-        rm /tmp/mindsdb.pid
-    fi
-else
-    # Try to find and kill any MindsDB processes
-    PIDS=$(ps aux | grep "python -m mindsdb" | grep -v grep | awk '{print $2}')
-    
-    if [ -n "$PIDS" ]; then
-        echo "Found MindsDB processes: $PIDS"
-        echo $PIDS | xargs kill
-        sleep 2
-        
-        # Force kill if still running
-        REMAINING=$(ps aux | grep "python -m mindsdb" | grep -v grep | awk '{print $2}')
-        if [ -n "$REMAINING" ]; then
-            echo "Force killing remaining processes..."
-            echo $REMAINING | xargs kill -9
-        fi
-        
-        echo "✅ MindsDB server stopped"
-    else
-        echo "⚠️  No MindsDB processes found"
-    fi
+    PIDS="$PIDS $(cat /tmp/mindsdb.pid)"
 fi
+
+for PORT in 47334 47335; do
+    PORT_PIDS=$(lsof -tiTCP:$PORT -sTCP:LISTEN 2>/dev/null || true)
+    if [ -n "$PORT_PIDS" ]; then
+        PIDS="$PIDS $PORT_PIDS"
+    fi
+done
+
+PROCESS_PIDS=$(pgrep -f "python -m mindsdb|mindsdb-server/bin/python.*multiprocessing-fork" 2>/dev/null || true)
+if [ -n "$PROCESS_PIDS" ]; then
+    PIDS="$PIDS $PROCESS_PIDS"
+fi
+
+PIDS=$(echo "$PIDS" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u | tr '\n' ' ')
+
+if [ -z "$PIDS" ]; then
+    echo "⚠️  No MindsDB processes found"
+    rm -f /tmp/mindsdb.pid
+    exit 0
+fi
+
+echo "Found MindsDB processes: $PIDS"
+kill $PIDS 2>/dev/null || true
+sleep 2
+
+REMAINING=""
+for PID in $PIDS; do
+    if kill -0 "$PID" 2>/dev/null; then
+        REMAINING="$REMAINING $PID"
+    fi
+done
+
+if [ -n "$REMAINING" ]; then
+    echo "Force killing remaining processes:$REMAINING"
+    kill -9 $REMAINING 2>/dev/null || true
+fi
+
+rm -f /tmp/mindsdb.pid
+echo "✅ MindsDB server stopped"
