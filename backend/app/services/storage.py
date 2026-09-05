@@ -5,9 +5,7 @@ Handles file storage operations for datasets with multiple backend support
 
 import os
 import hashlib
-import hmac
 import uuid
-import secrets
 import mimetypes
 from typing import Dict, Any, Optional, BinaryIO, AsyncGenerator
 from datetime import datetime, timedelta
@@ -384,16 +382,16 @@ class StorageService:
             # Try to get from settings first, then fall back to environment, then default
             try:
                 from app.core.config import settings
-                storage_dir = settings.STORAGE_BASE_PATH
+                storage_dir = settings.DATASET_STORAGE_PATH
                 logger.info(f"Using storage directory from settings: {storage_dir}")
-            except ImportError:
-                storage_dir = os.getenv('STORAGE_DIR', 
+            except (ImportError, AttributeError):
+                storage_dir = os.getenv('STORAGE_DIR',
                     os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "storage"))
                 logger.info(f"Using storage directory from environment/default: {storage_dir}")
-            
+
             self.backend = LocalStorageBackend(storage_dir)
             logger.info("Initialized local storage backend")
-            
+
         elif storage_type in ['s3', 's3_compatible']:
             # Unified S3/S3-compatible storage configuration
             bucket_name = os.getenv('S3_BUCKET_NAME')
@@ -403,25 +401,25 @@ class StorageService:
             region = os.getenv('S3_REGION') or os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
             use_ssl = os.getenv('S3_USE_SSL', 'true').lower() == 'true'
             addressing_style = os.getenv('S3_ADDRESSING_STYLE', 'path')
-            
+
             # For AWS S3, set endpoint_url to None to use default
             if storage_type == 's3' and not endpoint_url:
                 endpoint_url = None
-                
+
             if not all([bucket_name, access_key, secret_key]):
                 logger.error("S3 configuration incomplete, falling back to local storage")
                 logger.error(f"Missing: bucket_name={bucket_name is not None}, access_key={access_key is not None}, secret_key={secret_key is not None}")
                 try:
                     from app.core.config import settings
-                    storage_dir = settings.STORAGE_BASE_PATH
-                except ImportError:
+                    storage_dir = settings.DATASET_STORAGE_PATH
+                except (ImportError, AttributeError):
                     storage_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "storage")
                 self.backend = LocalStorageBackend(storage_dir)
             else:
                 try:
                     if not S3_AVAILABLE:
                         raise ImportError("boto3 not available")
-                        
+
                     self.backend = S3StorageBackend(
                         bucket_name=bucket_name,
                         access_key=access_key,
@@ -437,7 +435,7 @@ class StorageService:
                     logger.error(f"S3 initialization failed: {str(e)}, falling back to local storage")
                     try:
                         from app.core.config import settings
-                        storage_dir = settings.STORAGE_BASE_PATH
+                        storage_dir = settings.DATASET_STORAGE_PATH
                     except ImportError:
                         storage_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "storage")
                     self.backend = LocalStorageBackend(storage_dir)
@@ -527,98 +525,6 @@ class StorageService:
         """Get temporary URL for file access (if supported by backend)"""
         return self.backend.get_file_url(file_path, expires_in)
     
-    def _get_hmac_key(self) -> bytes:
-        """Get the HMAC signing key from settings, with a fallback for development."""
-        key = getattr(settings, 'SECRET_KEY', None)
-        if key:
-            return key.encode('utf-8') if isinstance(key, str) else key
-        # Fallback: derive a stable key from ENCRYPTION_KEY
-        enc_key = getattr(settings, 'ENCRYPTION_KEY', None)
-        if enc_key:
-            if isinstance(enc_key, str):
-                enc_key = enc_key.encode('utf-8')
-            return hashlib.sha256(enc_key).digest()
-        # Last resort for development only
-        logger.warning("No SECRET_KEY or ENCRYPTION_KEY configured — download tokens are NOT secure!")
-        return b"dev-fallback-key-change-in-production"
-
-    def generate_download_token(self, dataset_id: int, user_id: Optional[int] = None, expires_in_hours: int = 24) -> str:
-        """Generate a secure HMAC-signed download token for a dataset."""
-        random_part = secrets.token_urlsafe(32)
-        expiry = datetime.utcnow() + timedelta(hours=expires_in_hours)
-        expiry_ts = int(expiry.timestamp())
-
-        # Create payload
-        user_str = str(user_id) if user_id else "anon"
-        payload = f"{dataset_id}-{user_str}-{expiry_ts}"
-
-        # HMAC-SHA256 signing
-        token_data = f"{payload}-{random_part}"
-        sig = hmac.new(self._get_hmac_key(), token_data.encode(), hashlib.sha256).hexdigest()[:16]
-
-        return f"{payload}.{random_part}.{sig}"
-
-    def validate_download_token(self, token: str) -> bool:
-        """Validate an HMAC-signed download token."""
-        if not token or not isinstance(token, str):
-            return False
-
-        try:
-            parts = token.split(".")
-            if len(parts) != 3:
-                return False
-
-            payload, random_part, provided_sig = parts
-
-            # Validate payload format: dataset_id-user_str-expiry_ts
-            dash_count = payload.count("-")
-            if dash_count < 2:
-                return False
-
-            # Extract fields: last two fields are user_str and expiry_ts
-            *_, user_id_str, expiry_ts_str = payload.rsplit("-", 2)
-
-            # Validate dataset_id is numeric (the part before the first dash)
-            dataset_id_str = payload.split("-")[0]
-            try:
-                int(dataset_id_str)
-            except ValueError:
-                return False
-
-            # Validate user_id is numeric or "anon"
-            if user_id_str != "anon":
-                try:
-                    int(user_id_str)
-                except ValueError:
-                    return False
-
-            # Validate expiry_ts is numeric
-            try:
-                expiry_ts = int(expiry_ts_str)
-            except ValueError:
-                return False
-
-            # Check expiry
-            if datetime.utcnow().timestamp() > expiry_ts:
-                return False
-
-            # Validate random part length
-            if len(random_part) < 40:
-                return False
-
-            # Validate signature format
-            if len(provided_sig) != 16:
-                return False
-
-            # Verify HMAC signature
-            token_data = f"{payload}-{random_part}"
-            expected_sig = hmac.new(self._get_hmac_key(), token_data.encode(), hashlib.sha256).hexdigest()[:16]
-
-            return hmac.compare_digest(provided_sig, expected_sig)
-
-        except Exception as e:
-            logger.error(f"Token validation error: {str(e)}")
-            return False
     
     async def cleanup_orphaned_files(self, db_session) -> Dict[str, Any]:
         """Clean up files that no longer have corresponding dataset records"""

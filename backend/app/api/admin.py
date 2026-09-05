@@ -391,8 +391,9 @@ async def admin_delete_dataset(
         
         # Clean up associated MindsDB agent first
         try:
+            from app.services.agent_gateway import AgentGateway
             from app.services.mindsdb import MindsDBService
-            mindsdb_service = MindsDBService()
+            mindsdb_service: AgentGateway = MindsDBService()
             if dataset.agent_name:
                 agent_name = dataset.agent_name
                 if mindsdb_service.delete_dataset_agent(dataset, db):
@@ -1709,8 +1710,9 @@ async def _get_system_health_status(db: Session) -> Dict[str, Any]:
         # Check MindsDB connection
         mindsdb_status = {"connected": False, "error": None}
         try:
+            from app.services.agent_gateway import AgentGateway
             from app.services.mindsdb import MindsDBService
-            mindsdb_service = MindsDBService()
+            mindsdb_service: AgentGateway = MindsDBService()
             health_check = mindsdb_service.health_check()
             mindsdb_status = {
                 "connected": health_check.get("status") == "healthy",
@@ -2482,8 +2484,9 @@ async def cleanup_orphaned_datasets(
         dataset_ids = [d.id for d in orphaned_datasets]
 
         try:
+            from app.services.agent_gateway import AgentGateway
             from app.services.mindsdb import MindsDBService
-            mindsdb_service = MindsDBService()
+            mindsdb_service: AgentGateway = MindsDBService()
             for dataset in orphaned_datasets:
                 if dataset.agent_name:
                     mindsdb_service.delete_agent(dataset.agent_name)

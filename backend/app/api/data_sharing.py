@@ -1,28 +1,21 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import FileResponse
-from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
-from datetime import datetime, timedelta
-import uuid
+from datetime import datetime
 import logging
 import os
-import mimetypes
-import json
 
 from app.core.database import get_db
 from app.core.auth import get_current_user
-from app.core.config import settings
 from app.models.user import User
-from app.models.dataset import Dataset, DatasetChatSession, ChatMessage, ShareAccessSession
+from app.models.dataset import Dataset
 from app.services.data_sharing import DataSharingService
-from app.services.mindsdb import MindsDBService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-security = HTTPBearer()
 
 
 # Pydantic models for request/response
@@ -60,144 +53,6 @@ class ShareAnalyzeRequest(BaseModel):
 
 class DownloadSelectedFilesRequest(BaseModel):
     file_ids: List[int]
-
-
-def _is_visualization_prompt(message: Optional[str]) -> bool:
-    if not message:
-        return False
-    message_lower = message.lower()
-    return any(keyword in message_lower for keyword in [
-        'visualiz', 'chart', 'graph', 'plot', 'diagram', 'show', 'display',
-        'trend', 'distribution', 'correlation', 'relationship', 'compare',
-        'histogram', 'scatter', 'heatmap', 'bar', 'line', 'pie', 'dashboard'
-    ])
-
-
-def _compact_json(value: Any, max_chars: int = 1200) -> str:
-    if value in (None, {}, []):
-        return "Not available"
-    try:
-        text = json.dumps(value, default=str, ensure_ascii=False)
-    except TypeError:
-        text = str(value)
-    return text[:max_chars] + ("..." if len(text) > max_chars else "")
-
-
-def _build_anton_shared_context(dataset: Dataset, session: DatasetChatSession, message: Optional[str]) -> str:
-    chat_context = dataset.chat_context if isinstance(dataset.chat_context, dict) else {}
-    schema_metadata = dataset.schema_metadata if isinstance(dataset.schema_metadata, dict) else {}
-    anton_memory = chat_context.get("anton_memory", {}) if isinstance(chat_context.get("anton_memory", {}), dict) else {}
-    semantic_layer = chat_context.get("semantic_layer", {})
-    canonical_definitions = (
-        chat_context.get("canonical_definitions")
-        or chat_context.get("metrics")
-        or schema_metadata.get("canonical_definitions")
-        or schema_metadata.get("metrics")
-    )
-    taxonomy = chat_context.get("taxonomy") or schema_metadata.get("taxonomy")
-
-    lessons = anton_memory.get("lessons") or chat_context.get("lessons") or []
-    rules = anton_memory.get("rules") or chat_context.get("rules") or []
-    topics = anton_memory.get("topics") or chat_context.get("topics") or {}
-    skills = anton_memory.get("skills") or chat_context.get("skills") or []
-
-    source_kind = "connector/proxy" if dataset.connector_id or getattr(dataset, "mindsdb_database", None) else "uploaded file"
-    chart_guidance = "If the user asks for charts, dashboards, trends, or visual analysis, use the chart payload returned by the backend and explain why each chart is useful."
-
-    return f"""
-You are Anton, a MindsDB-style shared-data analyst. Work as an outcome-first BI agent: understand the recipient's goal, use the available shared dataset only, apply canonical definitions, and explain the reasoning behind your answer.
-
-Shared dataset:
-- Name: {dataset.name}
-- Description: {dataset.description or 'Not provided'}
-- Source kind: {source_kind}
-- Rows: {dataset.row_count or 'unknown'}
-- Columns: {dataset.column_count or 'unknown'}
-- Type: {getattr(dataset.type, 'value', dataset.type)}
-
-Anton memory model for this dataset:
-- Rules: {_compact_json(rules)}
-- Lessons: {_compact_json(lessons)}
-- Topics: {_compact_json(topics)}
-- Available BI skills/workflows: {_compact_json(skills)}
-
-Canonical taxonomy and semantic layer:
-- Taxonomy: {_compact_json(taxonomy)}
-- Canonical definitions / metrics: {_compact_json(canonical_definitions)}
-- Semantic layer: {_compact_json(semantic_layer)}
-- Schema metadata: {_compact_json(dataset.schema_metadata, 1800)}
-- Column statistics: {_compact_json(dataset.column_statistics, 1800)}
-- Data quality metrics: {_compact_json(dataset.quality_metrics, 1200)}
-
-Operating rules:
-- Only analyze this shared dataset and its approved connector/proxy representation.
-- Do not expose hidden credentials, raw connection parameters, or unrestricted source details.
-- Treat canonical definitions above as authoritative when answering business questions.
-- If a metric or taxonomy is missing, state the assumption before using it.
-- For dashboards, return a clear BI narrative: objective, metrics, dimensions, filters, chart rationale, and caveats.
-- {chart_guidance}
-
-Current session:
-- Session token: {session.session_token}
-- Prior messages in this session: {session.message_count}
-- Recipient request: {message or ''}
-""".strip()
-
-
-def _with_anton_context(message: Optional[str], dataset: Dataset, session: DatasetChatSession) -> str:
-    user_message = message or ""
-    return f"{_build_anton_shared_context(dataset, session, user_message)}\n\nRecipient message:\n{user_message}"
-
-
-async def _attach_shared_chat_visualizations(
-    chat_response: Dict[str, Any],
-    dataset: Dataset,
-    db: Session,
-    message: Optional[str],
-    mindsdb_service: MindsDBService,
-    max_visualizations: int = 3
-) -> Dict[str, Any]:
-    if not _is_visualization_prompt(message):
-        chat_response.setdefault("visualizations", [])
-        chat_response.setdefault("data_analysis", {})
-        chat_response.setdefault("has_visualizations", False)
-        chat_response.setdefault("visualization_count", 0)
-        return chat_response
-
-    try:
-        dataset_df = await mindsdb_service._load_dataset_for_visualization(dataset, db)
-        if dataset_df is None or dataset_df.empty:
-            chat_response.setdefault("visualizations", [])
-            chat_response.setdefault("data_analysis", {})
-            chat_response["has_visualizations"] = False
-            chat_response["visualization_count"] = 0
-            chat_response["visualization_message"] = "Anton could answer the question, but this shared data source is not tabular enough to chart automatically."
-            return chat_response
-
-        from app.services.data_visualization import get_visualization_service, sanitize_visualization_payload
-
-        viz_service = get_visualization_service(getattr(mindsdb_service, "api_key", None))
-        data_analysis = viz_service.analyze_dataset(dataset_df, dataset.name)
-        visualizations = viz_service.generate_chat_visualizations(
-            dataset_df,
-            query=message or "",
-            max_visualizations=max_visualizations
-        )
-
-        chat_response["visualizations"] = sanitize_visualization_payload(visualizations)
-        chat_response["data_analysis"] = sanitize_visualization_payload(data_analysis)
-        chat_response["has_visualizations"] = len(visualizations) > 0
-        chat_response["visualization_count"] = len(visualizations)
-        chat_response["source"] = "anton_shared_chat"
-    except Exception as e:
-        logger.warning(f"Shared chat visualization generation failed for dataset {dataset.id}: {e}")
-        chat_response.setdefault("visualizations", [])
-        chat_response.setdefault("data_analysis", {})
-        chat_response["has_visualizations"] = False
-        chat_response["visualization_count"] = 0
-        chat_response["visualization_message"] = "Anton answered the question, but chart generation failed for this request."
-
-    return chat_response
 
 
 # Data sharing endpoints
@@ -367,7 +222,10 @@ async def validate_shared_resources(
         "proxy_connectors": {},
         "validation_timestamp": datetime.utcnow().isoformat()
     }
-    
+
+    service = DataSharingService(db)
+    sharing_service = service.sharing
+
     # Validate share tokens
     if "share_tokens" in resource_tokens:
         for token in resource_tokens["share_tokens"]:
@@ -378,70 +236,18 @@ async def validate_shared_resources(
                     Dataset.is_deleted == False,
                     Dataset.is_active == True
                 ).first()
-                
+
                 if dataset:
                     # No longer checking expiration - share links don't expire
                     is_expired = False
-                    
-                    # Check connector if exists
-                    connector_valid = True
-                    if dataset.connector_id:
-                        connector = db.query(Dataset.__table__.c.connector_id).filter(
-                            Dataset.id == dataset.id
-                        ).first()
-                        if connector:
-                            from app.models.dataset import DatabaseConnector
-                            connector_obj = db.query(DatabaseConnector).filter(
-                                DatabaseConnector.id == dataset.connector_id,
-                                DatabaseConnector.is_deleted == False,
-                                DatabaseConnector.is_active == True
-                            ).first()
-                            connector_valid = connector_obj is not None
-                    
-                    # Check file exists for uploaded datasets
-                    file_valid = True
-                    if not dataset.connector_id:  # Only for non-connector datasets
-                        # Check dataset_files table first (new upload system)
-                        from app.models.dataset import DatasetFile
-                        dataset_files = db.query(DatasetFile).filter(
-                            DatasetFile.dataset_id == dataset.id,
-                            DatasetFile.is_deleted == False
-                        ).all()
 
-                        if dataset_files:
-                            # Check if files exist using storage service
-                            from app.services.storage import storage_service
-                            files_exist = False
-                            for dataset_file in dataset_files:
-                                if dataset_file.file_path:
-                                    try:
-                                        file_path = dataset_file.relative_path or dataset_file.file_path
-                                        file_exists = await storage_service.dataset_file_exists(file_path)
-                                        if file_exists:
-                                            files_exist = True
-                                            break
-                                    except Exception:
-                                        continue
-                            file_valid = files_exist
-                        elif dataset.file_path:
-                            # Legacy file_path validation using storage service
-                            from app.services.storage import storage_service
-                            try:
-                                file_valid = await storage_service.dataset_file_exists(dataset.file_path)
-                            except Exception:
-                                file_valid = False
-                        elif dataset.source_url and not dataset.source_url.startswith(('http://', 'https://')):
-                            # Check source_url using storage service
-                            from app.services.storage import storage_service
-                            try:
-                                file_valid = await storage_service.dataset_file_exists(dataset.source_url)
-                            except Exception:
-                                file_valid = False
-                        else:
-                            file_valid = False
-                    
+                    # Use shared validation method
+                    file_validation = await sharing_service.validate_dataset_files(dataset)
+                    file_valid = file_validation["file_valid"]
+                    connector_valid = file_valid if dataset.connector_id else True  # validate_dataset_files already handles connector check
+
                     validation_results["share_tokens"][token] = {
-                        "valid": not is_expired and connector_valid and file_valid,
+                        "valid": not is_expired and file_valid,
                         "dataset_name": dataset.name,
                         "is_expired": is_expired,
                         "connector_valid": connector_valid,
@@ -499,95 +305,37 @@ async def get_my_shared_datasets(
 ) -> List[Dict[str, Any]]:
     """Get all datasets shared by the current user with validity checks."""
     from app.models.dataset import Dataset
-    
+
     datasets = db.query(Dataset).filter(
         Dataset.owner_id == current_user.id,
         Dataset.public_share_enabled == True,
         Dataset.is_deleted == False,
         Dataset.is_active == True
     ).all()
-    
+
+    service = DataSharingService(db)
+    sharing_service = service.sharing
+
     result = []
-    
+
     for dataset in datasets:
         # No longer checking expiration - share links don't expire
         is_expired = False
-        
-        # Check connector validity
-        connector_valid = True
-        if dataset.connector_id:
-            from app.models.dataset import DatabaseConnector
-            connector = db.query(DatabaseConnector).filter(
-                DatabaseConnector.id == dataset.connector_id,
-                DatabaseConnector.is_deleted == False,
-                DatabaseConnector.is_active == True
-            ).first()
-            connector_valid = connector is not None
-        
-        # Check file validity - proper logic for different dataset types
-        file_valid = True
 
-        # For uploaded files, check both file_path and dataset_files table
-        if not dataset.connector_id:  # Only for non-connector datasets
-            # First check if dataset has files in the dataset_files table (new upload system)
-            from app.models.dataset import DatasetFile
-            dataset_files = db.query(DatasetFile).filter(
-                DatasetFile.dataset_id == dataset.id,
-                DatasetFile.is_deleted == False
-            ).all()
+        # Use shared validation method
+        file_validation = await sharing_service.validate_dataset_files(dataset)
+        file_valid = file_validation["file_valid"]
+        connector_valid = file_valid if dataset.connector_id else True
 
-            if dataset_files:
-                # For datasets with entries in dataset_files table, check if files exist using storage service
-                from app.services.storage import storage_service
-                files_exist = False
-                for dataset_file in dataset_files:
-                    if dataset_file.file_path:
-                        try:
-                            # Use storage service to check file existence (works for both S3 and local)
-                            file_path = dataset_file.relative_path or dataset_file.file_path
-                            if await storage_service.dataset_file_exists(file_path):
-                                files_exist = True
-                                break
-                        except Exception as e:
-                            logger.debug(f"File check failed for {dataset_file.file_path}: {e}")
-                            continue
-                file_valid = files_exist
-                logger.debug(f"Dataset {dataset.id} file validation via dataset_files: {file_valid}")
-            elif dataset.file_path:
-                # For legacy datasets with file_path, use storage service
-                from app.services.storage import storage_service
-                try:
-                    file_valid = await storage_service.dataset_file_exists(dataset.file_path)
-                    logger.debug(f"Dataset {dataset.id} legacy file validation via storage service: {file_valid}")
-                except Exception as e:
-                    logger.warning(f"Storage service validation failed for dataset {dataset.id}: {e}")
-                    file_valid = False
-            elif dataset.source_url and not dataset.source_url.startswith(('http://', 'https://')):
-                # For source_url based datasets (non-HTTP URLs are file paths)
-                from app.services.storage import storage_service
-                try:
-                    file_valid = await storage_service.dataset_file_exists(dataset.source_url)
-                    logger.debug(f"Dataset {dataset.id} source_url file validation via storage service: {file_valid}")
-                except Exception as e:
-                    logger.warning(f"Storage service validation failed for source_url {dataset.source_url}: {e}")
-                    file_valid = False
-            else:
-                # No file references found
-                file_valid = False
-                logger.debug(f"Dataset {dataset.id} has no file references")
-        else:
-            # For connector-based datasets, file validation is not applicable
-            file_valid = True
-        
         is_valid = not is_expired and connector_valid and file_valid
-        
+
         # Don't automatically disable sharing - just log warnings for invalid datasets
         if not is_valid:
             logger.warning(f"Dataset {dataset.id} ({dataset.name}) has validation issues: expired={is_expired}, connector_valid={connector_valid}, file_valid={file_valid}")
             # Only skip if include_invalid is False
             if not include_invalid:
                 continue
-        
+
         dataset_info = {
             "id": dataset.id,
             "name": dataset.name,
@@ -609,9 +357,9 @@ async def get_my_shared_datasets(
                 "file_valid": file_valid
             } if include_invalid else None
         }
-        
+
         result.append(dataset_info)
-    
+
     return result
 
 
@@ -775,132 +523,15 @@ async def chat_with_shared_dataset(
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """Chat with a shared dataset (public endpoint)."""
-    # Verify dataset and access
-    dataset = db.query(Dataset).filter(
-        Dataset.share_token == share_token,
-        Dataset.public_share_enabled == True,
-        Dataset.ai_chat_enabled == True,
-        Dataset.is_deleted == False
-    ).first()
-    
-    if not dataset:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Shared dataset not found or chat not enabled"
-        )
-    
-    # Check expiration
-    # No longer checking expiration - share links don't expire
-    if False:
-        raise HTTPException(
-            status_code=status.HTTP_410_GONE,
-            detail="Share link has expired"
-        )
-
     service = DataSharingService(db)
-    service.require_share_password(dataset, chat_request.password)
-
-    if not dataset.allow_ai_chat:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Chat is disabled for this dataset"
-        )
-
-    if len(chat_request.message or "") > 4000:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="Message is too long"
-        )
-
-    if not chat_request.session_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="A valid share access session is required for chat"
-        )
-
-    session = db.query(DatasetChatSession).filter(
-        DatasetChatSession.session_token == chat_request.session_token,
-        DatasetChatSession.dataset_id == dataset.id,
-        DatasetChatSession.share_token == share_token,
-        DatasetChatSession.is_active == True
-    ).first()
-
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Share chat session has expired"
-        )
-
-    if session.message_count >= settings.MAX_CHAT_SESSIONS_PER_DATASET:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Shared chat message limit reached for this session"
-        )
-
-    # Use MindsDB service for chat (agent-based or legacy)
-    mindsdb_service = MindsDBService()
     try:
-        anton_message = _with_anton_context(chat_request.message, dataset, session)
-
-        # Check if agent-based chat is enabled
-        from app.core.config import settings
-        if getattr(settings, 'USE_AGENT_BASED_CHAT', True):
-            # Use new agent-based architecture
-            chat_response = await mindsdb_service.chat_with_dataset_agent(
-                dataset_id=dataset.id,
-                message=anton_message,
-                db=db,
-                session_id=chat_request.session_token,
-                stream=True
-            )
-        else:
-            # Fallback to legacy model-based chat
-            chat_response = await mindsdb_service.chat_with_dataset(
-                dataset_id=str(dataset.id),
-                message=anton_message,
-                user_id=None,  # Anonymous user
-                session_id=chat_request.session_token,
-                organization_id=dataset.organization_id
-            )
-        
-        chat_response = await _attach_shared_chat_visualizations(
-            chat_response=chat_response,
-            dataset=dataset,
-            db=db,
-            message=chat_request.message,
-            mindsdb_service=mindsdb_service,
-            max_visualizations=3
+        return await service.chat_with_shared_dataset(
+            share_token=share_token, chat_request=chat_request, request=request
         )
-
-        answer_text = chat_response.get("answer") or chat_response.get("response") or ""
-        db.add(ChatMessage(
-            session_id=session.id,
-            message_type="user",
-            content=chat_request.message,
-            message_metadata={"source": "public_share", "anton_context": True}
-        ))
-        db.add(ChatMessage(
-            session_id=session.id,
-            message_type="assistant",
-            content=str(answer_text),
-            message_metadata={
-                "source": chat_response.get("source"),
-                "agent_name": chat_response.get("agent_name"),
-                "has_visualizations": chat_response.get("has_visualizations", False),
-                "visualization_count": chat_response.get("visualization_count", 0)
-            },
-            ai_model_version=chat_response.get("model")
-        ))
-
-        # Update session activity
-        session.message_count += 1
-        session.updated_at = datetime.utcnow()
-        db.commit()
-
-        return chat_response
-        
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Chat failed for shared dataset {dataset.id}: {e}")
+        logger.error(f"Chat failed for shared dataset with token {share_token}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Chat service error: {str(e)}"
@@ -915,99 +546,19 @@ async def analyze_shared_dataset_with_anton(
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """Analyze a shared dataset using the Anton data analyst experience."""
-    dataset = db.query(Dataset).filter(
-        Dataset.share_token == share_token,
-        Dataset.public_share_enabled == True,
-        Dataset.ai_chat_enabled == True,
-        Dataset.is_deleted == False
-    ).first()
-
-    if not dataset:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Shared dataset not found or analysis not enabled"
-        )
-
     service = DataSharingService(db)
-    service.require_share_password(dataset, analyze_request.password)
-
-    if not dataset.allow_ai_chat:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Analysis is disabled for this dataset"
-        )
-
-    if analyze_request.query and len(analyze_request.query) > 4000:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="Analysis query is too long"
-        )
-
-    mindsdb_service = MindsDBService()
-    prompt = analyze_request.query or (
-        "You are Anton, a shared-data analyst powered by MindsDB. Analyze this shared dataset for the recipient. "
-        "Summarize the dataset structure, key patterns, data quality issues, notable distributions, "
-        "potential correlations, recommended charts, and useful follow-up questions. Only analyze this shared dataset."
-    )
-
-    answer = "Anton analyzed the shared dataset and generated the summary below."
-    agent_name = "Anton"
-    model = None
     try:
-        chat_response = await mindsdb_service.chat_with_dataset_agent(
-            dataset_id=dataset.id,
-            message=prompt,
-            db=db,
-            session_id=None,
-            stream=True
+        return await service.analyze_shared_dataset_with_anton(
+            share_token=share_token, analyze_request=analyze_request, request=request
         )
-        answer = chat_response.get("answer") or chat_response.get("response") or answer
-        agent_name = chat_response.get("agent_name") or agent_name
-        model = chat_response.get("model")
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.warning(f"Anton narrative analysis failed for shared dataset {dataset.id}: {e}")
-
-    data_analysis: Dict[str, Any] = {}
-    visualizations: List[Dict[str, Any]] = []
-    max_visualizations = min(max(analyze_request.max_visualizations, 1), 5)
-
-    try:
-        from app.services.data_visualization import get_visualization_service, sanitize_visualization_payload
-        from app.core.app_config import get_app_config
-
-        dataset_df = await mindsdb_service._load_dataset_for_visualization(dataset, db)
-        if dataset_df is not None and not dataset_df.empty:
-            app_config = get_app_config()
-            viz_service = get_visualization_service(app_config.integrations.GOOGLE_API_KEY)
-            data_analysis = viz_service.analyze_dataset(dataset_df, dataset.name)
-            visualizations = viz_service.generate_chat_visualizations(
-                dataset_df,
-                query=analyze_request.query or "Generate useful visualizations for this shared dataset",
-                max_visualizations=max_visualizations
-            )
-            data_analysis = sanitize_visualization_payload(data_analysis)
-            visualizations = sanitize_visualization_payload(visualizations)
-    except Exception as e:
-        logger.warning(f"Anton visualization generation failed for shared dataset {dataset.id}: {e}")
-
-    dataset.share_view_count += 1
-    dataset.last_accessed = datetime.utcnow()
-    db.commit()
-
-    return {
-        "success": True,
-        "dataset_id": dataset.id,
-        "dataset_name": dataset.name,
-        "answer": answer,
-        "data_analysis": data_analysis,
-        "visualizations": visualizations,
-        "has_visualizations": len(visualizations) > 0,
-        "visualization_count": len(visualizations),
-        "source": "anton_shared_analysis",
-        "agent_name": agent_name,
-        "model": model,
-        "timestamp": datetime.utcnow().isoformat()
-    }
+        logger.error(f"Analysis failed for shared dataset with token {share_token}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Analysis service error: {str(e)}"
+        )
 
 
 @router.get("/public/shared/{share_token}/download")
@@ -1019,150 +570,22 @@ async def download_shared_dataset(
     db: Session = Depends(get_db)
 ):
     """Download a shared dataset (public endpoint)."""
-    # Verify dataset and access
-    dataset = db.query(Dataset).filter(
-        Dataset.share_token == share_token,
-        Dataset.public_share_enabled == True,
-        Dataset.allow_download == True,
-        Dataset.is_deleted == False
-    ).first()
-    
-    if not dataset:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Shared dataset not found or download not allowed"
-        )
-    
-    # Check expiration
-    # No longer checking expiration - share links don't expire
-    if False:
-        raise HTTPException(
-            status_code=status.HTTP_410_GONE,
-            detail="Share link has expired"
-        )
-    
     service = DataSharingService(db)
-    service.require_share_password(dataset, password)
-    
-    # Update session if provided
-    if session_token:
-        session = db.query(ShareAccessSession).filter(
-            ShareAccessSession.session_token == session_token,
-            ShareAccessSession.dataset_id == dataset.id,
-            ShareAccessSession.is_active == True
-        ).first()
-        
-        if session:
-            session.files_downloaded += 1
-            session.last_activity_at = datetime.utcnow()
-            db.commit()
-    
-    # Check if this is a URL (external dataset) - cannot download
-    if dataset.source_url and dataset.source_url.startswith(('http://', 'https://')):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot download external URL datasets. This dataset is hosted externally."
+    try:
+        return await service.download_shared_dataset(
+            share_token=share_token, password=password,
+            session_token=session_token, request=request
         )
-    
-    # Import storage service
-    from app.services.storage import storage_service
-    from app.models.dataset import DatasetFile
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Download failed for shared dataset with token {share_token}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Download failed: {str(e)}"
+        )
 
-    # Method 1: Check dataset_files table first (new upload system)
-    if dataset.is_multi_file_dataset or not dataset.source_url:
-        dataset_files = db.query(DatasetFile).filter(
-            DatasetFile.dataset_id == dataset.id,
-            DatasetFile.is_deleted == False
-        ).all()
 
-        if dataset_files:
-            # For multi-file datasets, create a zip
-            if dataset.is_multi_file_dataset and len(dataset_files) > 1:
-                import tempfile
-                import zipfile
-
-                # Create a temporary zip file
-                temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
-
-                try:
-                    with zipfile.ZipFile(temp_zip, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                        for dataset_file in dataset_files:
-                            try:
-                                # Retrieve file from storage service (works with S3 and local)
-                                file_path_to_retrieve = dataset_file.relative_path or dataset_file.file_path
-                                file_content = await storage_service.retrieve_dataset_file(file_path_to_retrieve)
-
-                                if file_content:
-                                    # Write to zip using BytesIO
-                                    from io import BytesIO
-                                    zip_file.writestr(dataset_file.filename, file_content)
-                                else:
-                                    logger.warning(f"File not found: {dataset_file.filename}")
-                            except Exception as e:
-                                logger.error(f"Failed to add file {dataset_file.filename} to zip: {str(e)}")
-
-                    temp_zip.close()
-
-                    # Return zip file
-                    download_name = f"{dataset.name}_all_files.zip"
-                    return FileResponse(
-                        path=temp_zip.name,
-                        filename=download_name,
-                        media_type='application/zip',
-                        headers={
-                            "Content-Disposition": f"attachment; filename=\"{download_name}\"",
-                            "Cache-Control": "no-cache, no-store, must-revalidate",
-                            "Pragma": "no-cache",
-                            "Expires": "0"
-                        }
-                    )
-                except Exception as e:
-                    # Clean up temp file on error
-                    if os.path.exists(temp_zip.name):
-                        os.unlink(temp_zip.name)
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail=f"Failed to create zip file: {str(e)}"
-                    )
-            else:
-                # For single file, use the first/primary file with storage service
-                primary_file = next((f for f in dataset_files if f.is_primary), dataset_files[0])
-                file_path_to_retrieve = primary_file.relative_path or primary_file.file_path
-
-                try:
-                    # Use storage service to get file stream
-                    return await storage_service.get_file_stream(file_path_to_retrieve)
-                except Exception as e:
-                    logger.error(f"Failed to retrieve file from storage: {str(e)}")
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail="File not found on server"
-                    )
-
-    # Method 2: Use source_url or file_path with storage service
-    file_path_to_retrieve = None
-
-    if dataset.file_path:
-        file_path_to_retrieve = dataset.file_path
-    elif dataset.source_url and not dataset.source_url.startswith(('http://', 'https://')):
-        file_path_to_retrieve = dataset.source_url
-
-    if file_path_to_retrieve:
-        try:
-            # Use storage service to get file stream (works with both S3 and local)
-            return await storage_service.get_file_stream(file_path_to_retrieve)
-        except Exception as e:
-            logger.error(f"Failed to retrieve file from storage: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="File not found on server"
-            )
-
-    # If we get here, no file was found
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="File not found on server"
-    )
 @router.get("/shared/{share_token}/download")
 async def download_shared_dataset_authenticated(
     share_token: str,

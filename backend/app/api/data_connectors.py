@@ -3,11 +3,10 @@ Enhanced Database Connectors API endpoints
 Provides endpoints for managing MySQL, PostgreSQL, S3, document processing, and other data connectors
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 import logging
-import json
 from datetime import datetime
 
 from app.core.database import get_db
@@ -15,9 +14,9 @@ from app.core.auth import get_current_user
 from app.models.user import User
 from app.models.dataset import DatabaseConnector, Dataset
 from app.models.organization import DataSharingLevel
-from app.services.mindsdb import MindsDBService
 from app.services.connector_service import ConnectorService
 from pydantic import BaseModel
+from app.core.encryption import encrypt_dict
 
 logger = logging.getLogger(__name__)
 
@@ -81,68 +80,16 @@ async def list_connectors(
     current_user: User = Depends(get_current_user)
 ):
     """List database connectors for the current organization."""
-    if not current_user.organization_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Must belong to an organization"
+    svc = ConnectorService(db)
+    try:
+        return await svc.list_connectors(
+            user=current_user, connector_type=connector_type,
+            active_only=active_only, include_datasets=include_datasets
         )
-    
-    query = db.query(DatabaseConnector).filter(
-        DatabaseConnector.organization_id == current_user.organization_id,
-        DatabaseConnector.is_deleted == False
-    )
-    
-    if active_only:
-        query = query.filter(DatabaseConnector.is_active == True)
-    
-    if connector_type:
-        query = query.filter(DatabaseConnector.connector_type == connector_type)
-    
-    connectors = query.order_by(DatabaseConnector.created_at.desc()).all()
-    
-    if include_datasets:
-        # Add dataset information to connectors
-        from app.models.dataset import Dataset
-        result = []
-        for connector in connectors:
-            # Get associated datasets
-            datasets = db.query(Dataset).filter(
-                Dataset.connector_id == connector.id,
-                Dataset.is_deleted == False
-            ).all()
-            
-            # Create DatasetInfo objects
-            dataset_infos = [
-                DatasetInfo(
-                    id=dataset.id,
-                    name=dataset.name,
-                    type=dataset.type.value,  # Convert enum to string
-                    sharing_level=dataset.sharing_level.value,  # Convert enum to string
-                    public_share_enabled=dataset.public_share_enabled
-                )
-                for dataset in datasets
-            ]
-            
-            # Create response object with datasets
-            connector_response = DatabaseConnectorResponse(
-                id=connector.id,
-                name=connector.name,
-                connector_type=connector.connector_type,
-                description=connector.description,
-                is_active=connector.is_active,
-                test_status=connector.test_status,
-                last_tested_at=connector.last_tested_at,
-                created_at=connector.created_at,
-                mindsdb_database_name=connector.mindsdb_database_name,
-                organization_id=connector.organization_id,
-                datasets=dataset_infos
-            )
-            
-            result.append(connector_response)
-        
-        return result
-    
-    return connectors
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+
+
 @router.put("/{connector_id}", response_model=DatabaseConnectorResponse)
 async def update_connector(
     connector_id: int,
@@ -150,55 +97,14 @@ async def update_connector(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Update an existing database connector with enhanced editing capabilities."""
-    if not current_user.organization_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Must belong to an organization"
-        )
-    
-    # Get the connector
-    connector = db.query(DatabaseConnector).filter(
-        DatabaseConnector.id == connector_id,
-        DatabaseConnector.organization_id == current_user.organization_id,
-        DatabaseConnector.is_deleted == False
-    ).first()
-    
-    if not connector:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Connector not found"
-        )
-    
-    # Check if connector is editable
-    if not getattr(connector, 'is_editable', True):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This connector is not editable"
-        )
-    
-    # Update fields
-    update_data = connector_update.dict(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(connector, field, value)
-    
-    # Reset test status if connection config or credentials changed
-    if connector_update.connection_config or connector_update.credentials:
-        connector.test_status = "untested"
-        connector.test_error = None
-        connector.last_tested_at = None
-    
-    connector.updated_at = datetime.utcnow()
-    
+    """Update an existing database connector."""
+    svc = ConnectorService(db)
     try:
-        db.commit()
-        db.refresh(connector)
-        
-        logger.info(f"Updated connector {connector_id} by user {current_user.id}")
-        
+        connector = await svc.update_connector(
+            connector_id=connector_id, connector_update=connector_update, user=current_user
+        )
         return DatabaseConnectorResponse(
-            id=connector.id,
-            name=connector.name,
+            id=connector.id, name=connector.name,
             connector_type=connector.connector_type,
             description=connector.description,
             is_active=connector.is_active,
@@ -208,9 +114,12 @@ async def update_connector(
             mindsdb_database_name=connector.mindsdb_database_name,
             organization_id=connector.organization_id
         )
-        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND if "not found" in str(e).lower()
+            else status.HTTP_403_FORBIDDEN, detail=str(e),
+        )
     except Exception as e:
-        db.rollback()
         logger.error(f"Error updating connector {connector_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -225,59 +134,19 @@ async def test_connector_connection(
     current_user: User = Depends(get_current_user)
 ):
     """Test the connection for a database connector."""
-    if not current_user.organization_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Must belong to an organization"
-        )
-    
-    # Get the connector
-    connector = db.query(DatabaseConnector).filter(
-        DatabaseConnector.id == connector_id,
-        DatabaseConnector.organization_id == current_user.organization_id,
-        DatabaseConnector.is_deleted == False
-    ).first()
-    
-    if not connector:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Connector not found"
-        )
-    
+    svc = ConnectorService(db)
     try:
-        # Initialize connector service
-        connector_service = ConnectorService(db)
-        
-        # Test the connection
-        test_result = await connector_service.test_connection(connector)
-        
-        # Update test status
-        connector.test_status = "success" if test_result["success"] else "failed"
-        connector.test_error = test_result.get("error")
-        connector.last_tested_at = datetime.utcnow()
-        
-        db.commit()
-        
-        return {
-            "success": test_result["success"],
-            "message": test_result.get("message", "Connection test completed"),
-            "error": test_result.get("error"),
-            "test_time": connector.last_tested_at.isoformat(),
-            "connection_details": test_result.get("details", {})
-        }
-        
+        return await svc.test_connector_connection(connector_id=connector_id, user=current_user)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND if "not found" in str(e).lower()
+            else status.HTTP_403_FORBIDDEN, detail=str(e),
+        )
     except Exception as e:
-        connector.test_status = "failed"
-        connector.test_error = str(e)
-        connector.last_tested_at = datetime.utcnow()
-        db.commit()
-        
         logger.error(f"Error testing connector {connector_id}: {str(e)}")
         return {
-            "success": False,
-            "message": "Connection test failed",
-            "error": str(e),
-            "test_time": connector.last_tested_at.isoformat()
+            "success": False, "message": "Connection test failed",
+            "error": str(e), "test_time": datetime.utcnow().isoformat()
         }
 
 
@@ -289,51 +158,15 @@ async def sync_connector_data(
     current_user: User = Depends(get_current_user)
 ):
     """Manually sync data from a real-time enabled connector."""
-    if not current_user.organization_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Must belong to an organization"
-        )
-    
-    # Get the connector
-    connector = db.query(DatabaseConnector).filter(
-        DatabaseConnector.id == connector_id,
-        DatabaseConnector.organization_id == current_user.organization_id,
-        DatabaseConnector.is_deleted == False
-    ).first()
-    
-    if not connector:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Connector not found"
-        )
-    
-    # Check if real-time sync is supported
-    if not getattr(connector, 'supports_real_time', False) and not force:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Real-time sync not supported for this connector. Use force=true to override."
-        )
-    
+    svc = ConnectorService(db)
     try:
-        # Initialize connector service
-        connector_service = ConnectorService(db)
-        
-        # Perform sync
-        sync_result = await connector_service.sync_connector_data(connector)
-        
-        # Update sync timestamp
-        connector.last_synced_at = datetime.utcnow()
-        db.commit()
-        
-        return {
-            "success": sync_result["success"],
-            "message": sync_result.get("message", "Data sync completed"),
-            "records_synced": sync_result.get("records_synced", 0),
-            "sync_time": connector.last_synced_at.isoformat(),
-            "details": sync_result.get("details", {})
-        }
-        
+        return await svc.sync_connector_data_by_id(connector_id=connector_id, user=current_user, force=force)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND if "not found" in str(e).lower()
+            else status.HTTP_403_FORBIDDEN if "organization" in str(e).lower()
+            else status.HTTP_400_BAD_REQUEST, detail=str(e),
+        )
     except Exception as e:
         logger.error(f"Error syncing connector {connector_id}: {str(e)}")
         raise HTTPException(
@@ -344,60 +177,69 @@ async def sync_connector_data(
 
 
 
-@router.post("/", response_model=DatabaseConnectorResponse)
-async def create_connector(
-    connector_data: DatabaseConnectorCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Create a new database connector."""
+async def _validate_connector_request(
+    name: str,
+    connector_type: str,
+    current_user: User,
+    db: Session,
+) -> None:
+    """Validate connector creation request - org check, type support, duplicate name."""
     if not current_user.organization_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Must belong to an organization"
         )
-    
-    # Validate connector type
+
     supported_types = ['mysql', 'postgresql', 's3', 'api', 'mongodb', 'clickhouse']
-    if connector_data.connector_type not in supported_types:
+    if connector_type not in supported_types:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported connector type. Supported: {supported_types}"
         )
-    
-    # Check for duplicate names in organization
+
     existing = db.query(DatabaseConnector).filter(
         DatabaseConnector.organization_id == current_user.organization_id,
-        DatabaseConnector.name == connector_data.name,
+        DatabaseConnector.name == name,
         DatabaseConnector.is_deleted == False
     ).first()
-    
+
     if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Connector with this name already exists"
         )
-    
-    # Encrypt credentials before storing
-    from app.core.encryption import encrypt_dict
-    encrypted_credentials = encrypt_dict(connector_data.credentials) if connector_data.credentials else None
+
+
+async def _build_and_test_connector(
+    name: str,
+    connector_type: str,
+    description: Optional[str],
+    connection_config: Dict[str, Any],
+    credentials: Optional[Dict[str, Any]],
+    current_user: User,
+    db: Session,
+    mindsdb_database_name: str,
+) -> DatabaseConnector:
+    """Shared connector creation and testing logic."""
+    # Encrypt credentials
+    encrypted_credentials = encrypt_dict(credentials) if credentials else None
 
     # Create connector
     db_connector = DatabaseConnector(
-        name=connector_data.name,
-        connector_type=connector_data.connector_type,
-        description=connector_data.description,
+        name=name,
+        connector_type=connector_type,
+        description=description,
         organization_id=current_user.organization_id,
-        connection_config=connector_data.connection_config,
-        credentials=encrypted_credentials,  # ✅ Now encrypted
+        connection_config=connection_config,
+        credentials=encrypted_credentials,
         created_by=current_user.id,
-        mindsdb_database_name=f"org_{current_user.organization_id}_{connector_data.name.lower().replace(' ', '_')}"
+        mindsdb_database_name=mindsdb_database_name,
     )
-    
+
     db.add(db_connector)
     db.commit()
     db.refresh(db_connector)
-    
+
     # Test connection immediately
     try:
         test_result = await test_connector_connection_sync(db_connector)
@@ -410,7 +252,32 @@ async def create_connector(
         db_connector.test_status = "failed"
         db_connector.test_error = str(e)
         db.commit()
-    
+
+    return db_connector
+
+
+@router.post("/", response_model=DatabaseConnectorResponse)
+async def create_connector(
+    connector_data: DatabaseConnectorCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Create a new database connector."""
+    await _validate_connector_request(
+        connector_data.name, connector_data.connector_type, current_user, db
+    )
+
+    db_connector = await _build_and_test_connector(
+        name=connector_data.name,
+        connector_type=connector_data.connector_type,
+        description=connector_data.description,
+        connection_config=connector_data.connection_config,
+        credentials=connector_data.credentials,
+        current_user=current_user,
+        db=db,
+        mindsdb_database_name=f"org_{current_user.organization_id}_{connector_data.name.lower().replace(' ', '_')}"
+    )
+
     return DatabaseConnectorResponse(
         id=db_connector.id,
         name=db_connector.name,
@@ -433,25 +300,15 @@ async def create_simplified_connector(
 ):
     """Create a new database connector using simplified URL input."""
     from app.utils.connection_parser import parse_connection_url, ConnectionParseError
-    
-    if not current_user.organization_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Must belong to an organization"
-        )
-    
-    # Validate connector type
-    supported_types = ['mysql', 'postgresql', 's3', 'api', 'mongodb', 'clickhouse']
-    if connector_data.connector_type not in supported_types:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported connector type. Supported: {supported_types}"
-        )
-    
+
+    await _validate_connector_request(
+        connector_data.name, connector_data.connector_type, current_user, db
+    )
+
     # Parse connection URL
     try:
         connection_config, credentials = parse_connection_url(
-            connector_data.connection_url, 
+            connector_data.connection_url,
             connector_data.connector_type
         )
     except ConnectionParseError as e:
@@ -459,53 +316,18 @@ async def create_simplified_connector(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid connection URL: {str(e)}"
         )
-    
-    # Check for duplicate names in organization
-    existing = db.query(DatabaseConnector).filter(
-        DatabaseConnector.organization_id == current_user.organization_id,
-        DatabaseConnector.name == connector_data.name,
-        DatabaseConnector.is_deleted == False
-    ).first()
-    
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Connector with this name already exists"
-        )
-    
-    # Encrypt credentials before storing
-    from app.core.encryption import encrypt_dict
-    encrypted_credentials = encrypt_dict(credentials) if credentials else None
 
-    # Create connector using parsed configuration
-    db_connector = DatabaseConnector(
+    db_connector = await _build_and_test_connector(
         name=connector_data.name,
         connector_type=connector_data.connector_type,
         description=connector_data.description,
-        organization_id=current_user.organization_id,
         connection_config=connection_config,
-        credentials=encrypted_credentials,  # ✅ Now encrypted
-        created_by=current_user.id,
+        credentials=credentials,
+        current_user=current_user,
+        db=db,
         mindsdb_database_name=f"org_{current_user.organization_id}_{connector_data.name.lower().replace(' ', '_')}"
     )
-    
-    db.add(db_connector)
-    db.commit()
-    db.refresh(db_connector)
-    
-    # Test connection immediately
-    try:
-        test_result = await test_connector_connection_sync(db_connector)
-        db_connector.test_status = "success" if test_result["success"] else "failed"
-        db_connector.test_error = test_result.get("error")
-        db_connector.last_tested_at = datetime.utcnow()
-        db.commit()
-    except Exception as e:
-        logger.warning(f"Initial connector test failed: {e}")
-        db_connector.test_status = "failed"
-        db_connector.test_error = str(e)
-        db.commit()
-    
+
     return DatabaseConnectorResponse(
         id=db_connector.id,
         name=db_connector.name,
@@ -552,78 +374,16 @@ async def delete_connector(
     current_user: User = Depends(get_current_user)
 ):
     """Delete a database connector."""
-    connector = db.query(DatabaseConnector).filter(
-        DatabaseConnector.id == connector_id,
-        DatabaseConnector.organization_id == current_user.organization_id,
-        DatabaseConnector.is_deleted == False
-    ).first()
-    
-    if not connector:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Connector not found"
+    svc = ConnectorService(db)
+    try:
+        return await svc.delete_connector(
+            connector_id=connector_id, user=current_user, force_delete=force_delete
         )
-    
-    # Disable sharing and proxy connectors for datasets that depend on this connector
-    affected_datasets = db.query(Dataset).filter(
-        Dataset.connector_id == connector_id,
-        Dataset.is_deleted == False
-    ).all()
-    
-    disabled_sharing_count = 0
-    disabled_proxy_count = 0
-    
-    mindsdb_service = MindsDBService()
-
-    for dataset in affected_datasets:
-        if dataset.agent_name:
-            try:
-                mindsdb_service.delete_dataset_agent(dataset, db)
-                logger.info(f"Deleted agent for dataset {dataset.id} due to connector deletion")
-            except Exception as e:
-                logger.warning(f"Failed to delete agent for dataset {dataset.id}: {e}")
-
-        # Disable sharing if enabled
-        if dataset.public_share_enabled:
-            dataset.public_share_enabled = False
-            dataset.share_token = None
-            dataset.share_password = None
-            dataset.ai_chat_enabled = False
-            disabled_sharing_count += 1
-            logger.info(f"Disabled sharing for dataset {dataset.id} due to connector deletion")
-
-        # Disable related proxy connectors
-        try:
-            from app.models.proxy_connector import ProxyConnector
-            proxy_connectors = db.query(ProxyConnector).filter(
-                ProxyConnector.name == dataset.name,
-                ProxyConnector.organization_id == dataset.organization_id,
-                ProxyConnector.is_active == True
-            ).all()
-            
-            for proxy_connector in proxy_connectors:
-                proxy_connector.is_active = False
-                disabled_proxy_count += 1
-                logger.info(f"Disabled proxy connector {proxy_connector.proxy_id} due to connector deletion")
-                
-        except Exception as e:
-            logger.warning(f"Failed to disable proxy connectors for dataset {dataset.id}: {e}")
-
-    if force_delete and current_user.is_superuser:
-        # Hard delete
-        db.delete(connector)
-    else:
-        # Soft delete
-        connector.soft_delete(current_user.id)
-    
-    db.commit()
-    
-    return {
-        "message": "Connector deleted successfully",
-        "affected_datasets": len(affected_datasets),
-        "disabled_sharing": disabled_sharing_count,
-        "disabled_proxy_connectors": disabled_proxy_count
-    }
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND if "not found" in str(e).lower()
+            else status.HTTP_403_FORBIDDEN, detail=str(e),
+        )
 
 
 

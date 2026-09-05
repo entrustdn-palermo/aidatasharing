@@ -26,7 +26,7 @@ class StorageMigrationService:
         # Initialize local backend
         try:
             from app.core.config import settings
-            storage_dir = settings.STORAGE_BASE_PATH
+            storage_dir = settings.DATASET_STORAGE_PATH
         except ImportError:
             storage_dir = os.getenv('STORAGE_DIR', 
                 os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "storage"))
