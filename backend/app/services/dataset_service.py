@@ -1337,6 +1337,27 @@ class DatasetService:
                     content_preview = df.head(3).to_string()
                     row_count = len(df)
                     column_count = len(df.columns)
+
+                    # Compute per-column statistics for the aggregate pool
+                    from app.services.agri_data import is_numeric_dtype
+
+                    col_stats = {}
+                    for col in df.columns:
+                        entry = {
+                            "data_type": str(df[col].dtype),
+                            "non_null_count": int(df[col].count()),
+                            "null_count": int(df[col].isnull().sum()),
+                            "unique_count": int(df[col].nunique()),
+                        }
+                        if is_numeric_dtype(df[col].dtype):
+                            col_mean = df[col].mean()
+                            # An all-NaN numeric column yields NaN; storing it
+                            # would poison the pooled aggregate with invalid
+                            # JSON. Skip the mean when there is no data.
+                            if pd.notna(col_mean):
+                                entry["mean"] = round(float(col_mean), 6)
+                        col_stats[col] = entry
+                    file_meta["column_stats"] = col_stats
                 except Exception as e:
                     logger.warning(f"Could not analyse CSV: {e}")
         finally:

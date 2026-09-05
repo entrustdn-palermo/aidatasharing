@@ -280,3 +280,335 @@ class TestSeed:
         assert len(names) >= 5
         assert "Padi" in names
         assert "Jagung" in names
+
+
+# ── Regional Aggregate ────────────────────────────────────────────────
+
+# A lightweight Dataset-like object for testing aggregate queries.
+# Uses a plain class rather than the real SQLAlchemy model so that the
+# unit tests never touch the DB schema at all — the external seam is
+# the mocked db_session, same as every other test in this file.
+
+
+class FakeDataset:
+    """Stand-in for a SQLAlchemy Dataset row in aggregate tests."""
+
+    def __init__(self, *, id=1, organization_id=10, region_id=1, crop_id=1,
+                 season="2026A", yield_column="produksi",
+                 column_statistics=None, is_active=True, is_deleted=False,
+                 sharing_level="private"):
+        self.id = id
+        self.organization_id = organization_id
+        self.region_id = region_id
+        self.crop_id = crop_id
+        self.season = season
+        self.yield_column = yield_column
+        self.column_statistics = column_statistics or {}
+        self.is_active = is_active
+        self.is_deleted = is_deleted
+        self.sharing_level = sharing_level
+
+
+def make_ds(**kw):
+    """Convenience factory for FakeDataset with a minimal column_statistics."""
+    kw.setdefault("column_statistics", {"produksi": {"mean": 5.0}})
+    return FakeDataset(**kw)
+
+
+class TestContributorMinimum:
+    def test_default_is_five(self, svc, db_session):
+        db_session.first.return_value = None
+        assert svc.get_contributor_minimum() == 5
+
+    def test_reads_stored_value(self, svc, db_session):
+        from app.models.config import Configuration
+
+        db_session.first.return_value = Configuration(
+            key=svc.CONTRIBUTOR_MINIMUM_KEY, value="7"
+        )
+        assert svc.get_contributor_minimum() == 7
+
+    def test_set_and_read_back(self, svc, db_session):
+        db_session.first.return_value = None  # no existing row
+
+        svc.set_contributor_minimum(10)
+
+        assert db_session.add.called
+        added = db_session.add.call_args[0][0]
+        assert added.key == svc.CONTRIBUTOR_MINIMUM_KEY
+        assert added.value == "10"
+        db_session.commit.assert_called()
+
+    def test_set_rejects_less_than_two(self, svc):
+        with pytest.raises(ValueError, match=">= 2"):
+            svc.set_contributor_minimum(1)
+        with pytest.raises(ValueError, match=">= 2"):
+            svc.set_contributor_minimum(0)
+        with pytest.raises(ValueError, match=">= 2"):
+            svc.set_contributor_minimum(-5)
+
+    def test_update_existing_value(self, svc, db_session):
+        from app.models.config import Configuration
+
+        existing = Configuration(key=svc.CONTRIBUTOR_MINIMUM_KEY, value="5")
+        db_session.first.return_value = existing
+
+        svc.set_contributor_minimum(8)
+
+        assert existing.value == "8"
+        db_session.commit.assert_called()
+
+
+class TestRegionalAggregate:
+    def test_cross_org_pooling(self, svc, db_session):
+        """Datasets from different orgs all contribute to the pool."""
+        ds1 = make_ds(id=1, organization_id=10, yield_column="hasil",
+                       column_statistics={"hasil": {"mean": 4.5}})
+        ds2 = make_ds(id=2, organization_id=20, yield_column="hasil",
+                       column_statistics={"hasil": {"mean": 5.2}})
+        ds3 = make_ds(id=3, organization_id=30, yield_column="hasil",
+                       column_statistics={"hasil": {"mean": 6.0}})
+        db_session.all.return_value = [ds1, ds2, ds3]
+
+        result = svc.compute_regional_aggregate(
+            region_id=1, crop_id=1, season="2026A"
+        )
+
+        # 3 datasets from 3 different orgs pool together, but the
+        # Contributor Minimum (5) is not met → honest not-enough-data.
+        assert result["state"] == "not-enough-data"
+        assert result["contributor_count"] == 3
+
+    def test_aggregate_math(self, svc, db_session):
+        """Pooled mean is the arithmetic mean of per-dataset yield means."""
+        datasets = [
+            make_ds(id=i, organization_id=10 + i,
+                    column_statistics={"produksi": {"mean": v}})
+            for i, v in enumerate([4.0, 5.0, 6.0, 7.0, 8.0], start=1)
+        ]
+        db_session.all.return_value = datasets
+
+        result = svc.compute_regional_aggregate(
+            region_id=1, crop_id=1, season="2026A"
+        )
+
+        assert result["state"] == "ready"
+        # (4+5+6+7+8) / 5 = 6.0
+        assert abs(result["pooled_mean_yield"] - 6.0) < 0.0001
+        assert result["contributor_count"] == 5
+
+    def test_minimum_gate_below_threshold(self, svc, db_session):
+        """Below the minimum, the API returns not-enough-data."""
+        # Only 3 contributing datasets (minimum is 5)
+        datasets = [
+            make_ds(id=i, organization_id=10 + i)
+            for i in range(1, 4)
+        ]
+        db_session.all.return_value = datasets
+
+        result = svc.compute_regional_aggregate(
+            region_id=1, crop_id=1, season="2026A"
+        )
+
+        assert result["state"] == "not-enough-data"
+        assert result["contributor_count"] == 3
+        assert result["minimum"] == 5
+        assert "pooled_mean_yield" not in result
+
+    def test_own_dataset_counts_toward_minimum(self, svc, db_session):
+        """The querying member's dataset always counts toward the minimum.
+
+        It counts by being part of the pool: the pool query has no
+        organization filter, so the member's own dataset is included
+        exactly like every other Contributing Dataset.
+        """
+        # 4 other orgs + the member's own org = 5
+        own_org_id = 99
+        others = [
+            make_ds(id=i, organization_id=10 + i)
+            for i in range(1, 5)
+        ]
+        own = make_ds(id=99, organization_id=own_org_id)
+        db_session.all.return_value = others + [own]
+
+        result = svc.compute_regional_aggregate(
+            region_id=1, crop_id=1, season="2026A",
+        )
+
+        assert result["state"] == "ready"
+        assert result["contributor_count"] == 5
+
+    def test_minimum_gate_met_exactly(self, svc, db_session):
+        """Exactly 5 contributing datasets produces a ready aggregate."""
+        datasets = [
+            make_ds(id=i, organization_id=10 + i)
+            for i in range(1, 6)
+        ]
+        db_session.all.return_value = datasets
+
+        result = svc.compute_regional_aggregate(
+            region_id=1, crop_id=1, season="2026A"
+        )
+
+        assert result["state"] == "ready"
+        assert result["contributor_count"] == 5
+
+    def test_admin_configurable_minimum(self, svc, db_session):
+        """When admin sets minimum to 3, 3 datasets is enough."""
+        from app.models.config import Configuration
+
+        db_session.first.return_value = Configuration(
+            key=svc.CONTRIBUTOR_MINIMUM_KEY, value="3"
+        )
+        datasets = [
+            make_ds(id=i, organization_id=10 + i)
+            for i in range(1, 4)
+        ]
+        db_session.all.return_value = datasets
+
+        result = svc.compute_regional_aggregate(
+            region_id=1, crop_id=1, season="2026A"
+        )
+
+        assert result["state"] == "ready"
+        assert result["contributor_count"] == 3
+
+    def test_region_crop_season_filtering(self, svc, db_session):
+        """Only datasets matching region_id + crop_id + season qualify."""
+        # The mock simulates SQL WHERE: only matching datasets are returned.
+        # Non-matching datasets (wrong region/crop/season) would be filtered
+        # out by the query and never reach the Python-level loop.
+        matching = [
+            make_ds(id=i, organization_id=10 + i)
+            for i in range(1, 6)
+        ]
+        db_session.all.return_value = matching
+
+        result = svc.compute_regional_aggregate(
+            region_id=1, crop_id=1, season="2026A"
+        )
+
+        assert result["state"] == "ready"
+        assert result["contributor_count"] == 5
+
+    def test_no_yield_data_returns_not_enough(self, svc, db_session):
+        """5 datasets but none have yield means in stats → not-enough-data."""
+        datasets = [
+            make_ds(id=i, organization_id=10 + i,
+                    column_statistics={"produksi": {}})  # no "mean" key
+            for i in range(1, 6)
+        ]
+        db_session.all.return_value = datasets
+
+        result = svc.compute_regional_aggregate(
+            region_id=1, crop_id=1, season="2026A"
+        )
+
+        assert result["state"] == "not-enough-data"
+        assert result["contributor_count"] == 5
+        assert "pooled_mean_yield" not in result
+
+    def test_excludes_inactive_and_deleted(self, svc, db_session):
+        """Inactive and soft-deleted datasets do not count."""
+        # The mock simulates SQL WHERE: the query already filters out
+        # is_active=False and is_deleted=True, so only qualifying rows
+        # reach the Python-level loop.
+        datasets = [
+            make_ds(id=3, organization_id=30),
+            make_ds(id=4, organization_id=40),
+            make_ds(id=5, organization_id=50),
+            make_ds(id=6, organization_id=60),
+            make_ds(id=7, organization_id=70),
+        ]
+        db_session.all.return_value = datasets
+
+        result = svc.compute_regional_aggregate(
+            region_id=1, crop_id=1, season="2026A"
+        )
+
+        assert result["state"] == "ready"
+        assert result["contributor_count"] == 5  # only 5 (not 7) → 2 excluded
+
+    def test_never_exposes_individual_rows(self, svc, db_session):
+        """Response never contains raw yield values or contributor identities."""
+        datasets = [
+            make_ds(id=i, organization_id=10 + i,
+                    column_statistics={"produksi": {"mean": 5.0 + i}})
+            for i in range(1, 6)
+        ]
+        db_session.all.return_value = datasets
+
+        result = svc.compute_regional_aggregate(
+            region_id=1, crop_id=1, season="2026A"
+        )
+
+        assert result["state"] == "ready"
+        assert "pooled_mean_yield" in result
+        # Must not leak individual values
+        for key in ("yield_values", "datasets", "organizations", "contributor_ids"):
+            assert key not in result, f"Response must not contain '{key}'"
+
+    def test_sharing_level_irrelevant_to_pool_membership(self, svc, db_session):
+        """Private datasets join the pool just like shared ones (ADR-0001).
+
+        Sharing Level governs the dataset itself, not the pool — a fully
+        tagged private dataset is a Contributing Dataset like any other.
+        """
+        datasets = [
+            make_ds(id=i, organization_id=10 + i,
+                    sharing_level="private" if i % 2 else "organization")
+            for i in range(1, 6)
+        ]
+        db_session.all.return_value = datasets
+
+        result = svc.compute_regional_aggregate(
+            region_id=1, crop_id=1, season="2026A"
+        )
+
+        assert result["state"] == "ready"
+        assert result["contributor_count"] == 5
+
+class TestYieldMeanFromStats:
+    def test_extracts_flat_mean(self):
+        stats = {"produksi": {"mean": 5.25}}
+        ds = FakeDataset(yield_column="produksi", column_statistics=stats)
+        assert AgriDataService._yield_mean_from_stats(ds) == 5.25
+
+    def test_extracts_nested_mean(self):
+        stats = {"columns": {"produksi": {"mean": 6.0}}}
+        ds = FakeDataset(yield_column="produksi", column_statistics=stats)
+        assert AgriDataService._yield_mean_from_stats(ds) == 6.0
+
+    def test_returns_none_when_missing(self):
+        ds = FakeDataset(yield_column="hasil", column_statistics={})
+        assert AgriDataService._yield_mean_from_stats(ds) is None
+
+    def test_returns_none_when_stats_none(self):
+        ds = FakeDataset(yield_column="produksi", column_statistics=None)
+        assert AgriDataService._yield_mean_from_stats(ds) is None
+
+    def test_returns_none_for_nan_mean(self):
+        """A NaN mean (legacy data) must not poison the pooled aggregate."""
+        import math
+
+        ds = FakeDataset(
+            yield_column="produksi",
+            column_statistics={"produksi": {"mean": float("nan")}},
+        )
+        result = AgriDataService._yield_mean_from_stats(ds)
+        assert result is None or not math.isnan(result)
+        assert result is None
+
+    def test_returns_none_for_non_numeric_mean(self):
+        ds = FakeDataset(
+            yield_column="produksi",
+            column_statistics={"produksi": {"mean": "not-a-number"}},
+        )
+        assert AgriDataService._yield_mean_from_stats(ds) is None
+
+    def test_nested_non_dict_column_is_skipped(self):
+        ds = FakeDataset(
+            yield_column="produksi",
+            column_statistics={"columns": {"produksi": "corrupt"}},
+        )
+        assert AgriDataService._yield_mean_from_stats(ds) is None

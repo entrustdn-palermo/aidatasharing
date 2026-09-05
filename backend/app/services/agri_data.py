@@ -401,6 +401,191 @@ class AgriDataService:
             for field in ("region_id", "crop_id", "season", "yield_column")
         )
 
+    # ── Contributor Minimum ─────────────────────────────────────────
+
+    CONTRIBUTOR_MINIMUM_KEY = "agri.contributor_minimum"
+    CONTRIBUTOR_MINIMUM_DEFAULT = 5
+
+    def get_contributor_minimum(self) -> int:
+        """Read the admin-configurable Contributor Minimum from the DB.
+
+        Falls back to the default (5) when no row exists.  The value is
+        stored in the ``Configuration`` table, which is keyed by string.
+        """
+        from app.models.config import Configuration
+
+        row = (
+            self.db.query(Configuration)
+            .filter(Configuration.key == self.CONTRIBUTOR_MINIMUM_KEY)
+            .first()
+        )
+        if row is None or row.value is None:
+            return self.CONTRIBUTOR_MINIMUM_DEFAULT
+        try:
+            return int(row.value)
+        except (ValueError, TypeError):
+            return self.CONTRIBUTOR_MINIMUM_DEFAULT
+
+    def set_contributor_minimum(self, value: int, /) -> None:
+        """Set the Contributor Minimum (admin).  Must be >= 2."""
+        if not isinstance(value, int) or value < 2:
+            raise ValueError("Contributor Minimum must be an integer >= 2")
+        from app.models.config import Configuration
+
+        row = (
+            self.db.query(Configuration)
+            .filter(Configuration.key == self.CONTRIBUTOR_MINIMUM_KEY)
+            .first()
+        )
+        if row is None:
+            row = Configuration(
+                key=self.CONTRIBUTOR_MINIMUM_KEY,
+                value=str(value),
+                description=(
+                    "Minimum number of contributing datasets required before a "
+                    "Regional Aggregate is shown (ADR-0001)."
+                ),
+            )
+            self.db.add(row)
+        else:
+            row.value = str(value)
+        self.db.commit()
+
+    # ── Regional Aggregate ──────────────────────────────────────────
+
+    def compute_regional_aggregate(
+        self,
+        region_id: int,
+        crop_id: int,
+        season: str,
+    ) -> Dict[str, Any]:
+        """Pooled mean yield per hectare for a Region + Crop + Season.
+
+        Returns the pooled mean and the contributor count, *only* when the
+        Contributor Minimum is met.  Below the minimum the result carries
+        ``{"state": "not-enough-data", "contributor_count": N}``.
+
+        The querying member's own Dataset always counts toward the minimum
+        for their view: it is a Contributing Dataset like any other and is
+        part of the pool the query returns.
+
+        No response ever exposes individual rows or contributor identities.
+        """
+        from app.models.dataset import Dataset
+
+        minimum = self.get_contributor_minimum()
+
+        # Collect all qualifying Datasets sharing this Region + Crop + Season
+        # regardless of organization — the cross-org pool (ADR-0001).
+        datasets: List[Dataset] = (
+            self.db.query(Dataset)
+            .filter(
+                Dataset.region_id == region_id,
+                Dataset.crop_id == crop_id,
+                Dataset.season == season,
+                Dataset.is_active.is_(True),
+                Dataset.is_deleted.is_(False),
+                Dataset.yield_column.isnot(None),
+            )
+            .all()
+        )
+
+        # The contributor count is the number of Contributing Datasets in the
+        # pool (ADR-0001: "at least five contributing datasets"). The querying
+        # member's own dataset is part of the pool like any other — it always
+        # counts toward their view's minimum.
+        contributor_count = 0
+        yield_values: list[float] = []
+
+        for ds in datasets:
+            # Skip datasets that don't actually qualify
+            if not self.is_contributing_dataset(ds):
+                continue
+
+            contributor_count += 1
+
+            # Extract the yield mean from column_statistics.
+            # The yield_column tells us which column name to read; the
+            # column_statistics dict holds per-column stats computed at upload.
+            mean = self._yield_mean_from_stats(ds)
+            if mean is not None:
+                yield_values.append(mean)
+
+        if contributor_count < minimum:
+            return {
+                "state": "not-enough-data",
+                "contributor_count": contributor_count,
+                "minimum": minimum,
+                "region_id": region_id,
+                "crop_id": crop_id,
+                "season": season,
+            }
+
+        if not yield_values:
+            return {
+                "state": "not-enough-data",
+                "contributor_count": contributor_count,
+                "minimum": minimum,
+                "region_id": region_id,
+                "crop_id": crop_id,
+                "season": season,
+            }
+
+        pooled_mean = sum(yield_values) / len(yield_values)
+
+        return {
+            "state": "ready",
+            "pooled_mean_yield": round(pooled_mean, 6),
+            "contributor_count": contributor_count,
+            "minimum": minimum,
+            "region_id": region_id,
+            "crop_id": crop_id,
+            "season": season,
+        }
+
+    @staticmethod
+    def _yield_mean_from_stats(dataset: "Dataset") -> Optional[float]:
+        """Extract the yield column's mean from a dataset's column_statistics.
+
+        Returns None when the mean is absent or NaN — a NaN mean (possible in
+        data stored before the upload guard existed) would poison the pooled
+        aggregate and break JSON serialization.
+        """
+        import math
+
+        stats = getattr(dataset, "column_statistics", None)
+        yield_col = getattr(dataset, "yield_column", None)
+        if not stats or not yield_col:
+            return None
+
+        def _valid_mean(raw):
+            if raw is None:
+                return None
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return None
+            return None if math.isnan(value) else value
+
+        # Flat structure: {"produksi": {"mean": 5.25}}
+        if isinstance(stats, dict) and yield_col in stats:
+            col_stats = stats[yield_col]
+            if isinstance(col_stats, dict):
+                mean = _valid_mean(col_stats.get("mean"))
+                if mean is not None:
+                    return mean
+
+        # Nested structure: {"columns": {"produksi": {"mean": 6.0}}}
+        if isinstance(stats, dict):
+            columns = stats.get("columns", {})
+            col_stats = columns.get(yield_col) if isinstance(columns, dict) else None
+            if isinstance(col_stats, dict):
+                mean = _valid_mean(col_stats.get("mean"))
+                if mean is not None:
+                    return mean
+
+        return None
+
     # ── Internals ─────────────────────────────────────────────────────
 
     def _find_region(self, region_id: Optional[int]) -> Optional[Region]:

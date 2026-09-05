@@ -193,3 +193,70 @@ async def suggest_yield_column_for_file(
     return AgriDataService(db).suggest_yield_column_for_file(
         content, file.filename or ""
     )
+
+
+# ── Regional Aggregate (cross-org pool, ADR-0001) ─────────────────────
+
+class RegionalAggregateResponse(BaseModel):
+    state: str  # "ready" | "not-enough-data"
+    pooled_mean_yield: Optional[float] = None
+    contributor_count: int
+    minimum: int
+    region_id: int
+    crop_id: int
+    season: str
+
+
+@router.get("/regional-aggregate", response_model=RegionalAggregateResponse)
+async def get_regional_aggregate(
+    region_id: int,
+    crop_id: int,
+    season: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Pooled mean yield per hectare for a Region + Crop + Season.
+
+    The result is only shown when the Contributor Minimum is met. The
+    querying member's own dataset(s) always count toward the minimum —
+    they are part of the pool like any other Contributing Dataset.
+    Individual rows are never exposed.
+    """
+    return AgriDataService(db).compute_regional_aggregate(
+        region_id, crop_id, season,
+    )
+
+
+class ContributorMinimumResponse(BaseModel):
+    minimum: int
+
+
+class ContributorMinimumUpdate(BaseModel):
+    minimum: int
+
+
+@router.get("/contributor-minimum", response_model=ContributorMinimumResponse)
+async def get_contributor_minimum(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Read the current Contributor Minimum (default 5)."""
+    return {"minimum": AgriDataService(db).get_contributor_minimum()}
+
+
+@router.put(
+    "/contributor-minimum",
+    response_model=ContributorMinimumResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def set_contributor_minimum(
+    payload: ContributorMinimumUpdate,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Set the Contributor Minimum (admin only, must be >= 2)."""
+    try:
+        AgriDataService(db).set_contributor_minimum(payload.minimum)
+    except ValueError as err:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(err))
+    return {"minimum": payload.minimum}
