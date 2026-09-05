@@ -9,7 +9,7 @@ resolvable by id for Datasets already tagged with them.
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -146,3 +146,50 @@ async def deactivate_crop(
     except ValueError as err:
         raise _map_service_error(err)
     return _to_crop_response(crop)
+
+
+# ── Yield-column suggestion ───────────────────────────────────────────
+
+class YieldSuggestionResponse(BaseModel):
+    dataset_id: Optional[int] = None
+    suggestion: Optional[str] = None
+    numeric_columns: List[str]
+
+
+@router.get("/suggest-yield-column", response_model=YieldSuggestionResponse)
+async def suggest_yield_column(
+    dataset_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Best-guess yield column for an uploaded dataset (suggestion only).
+
+    Never applied without the user's choice.
+    """
+    try:
+        return AgriDataService(db).suggest_yield_column_for_dataset(
+            dataset_id, current_user
+        )
+    except ValueError as err:
+        raise _map_service_error(err)
+    except PermissionError as err:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=str(err)
+        )
+
+
+@router.post("/suggest-yield-column/file", response_model=YieldSuggestionResponse)
+async def suggest_yield_column_for_file(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Best-guess yield column for a not-yet-uploaded file.
+
+    Lets a tagging wizard ask "which column is the yield?" before the
+    upload commits; the tags themselves are only ever set at upload time.
+    """
+    content = await file.read()
+    return AgriDataService(db).suggest_yield_column_for_file(
+        content, file.filename or ""
+    )

@@ -133,6 +133,14 @@ class Dataset(Base):
     # Download tracking
     download_count = Column(Integer, default=0)  # Total number of downloads
     last_downloaded_at = Column(DateTime, nullable=True)  # Last download timestamp
+
+    # Agricultural tags (wizard upload): dataset-level in v1.
+    # region_id/crop_id stay resolvable even after the reference entry is
+    # deactivated — historical tags never break.
+    region_id = Column(Integer, ForeignKey("agri_regions.id"), nullable=True, index=True)
+    crop_id = Column(Integer, ForeignKey("agri_crops.id"), nullable=True, index=True)
+    season = Column(String(50), nullable=True)  # Growing season the records cover
+    yield_column = Column(String(255), nullable=True)  # User-confirmed numeric yield column
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
