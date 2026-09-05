@@ -188,12 +188,27 @@ def init_db():
             existing_config = db.query(Configuration).filter(
                 Configuration.key == config_data["key"]
             ).first()
-            
+
             if not existing_config:
                 config = Configuration(**config_data)
                 db.add(config)
-        
+
         db.commit()
+
+        # Seed agricultural reference data (idempotent). Runs after the
+        # config commit so a seed failure can't roll back unrelated work.
+        try:
+            from app.services.agri_data import AgriDataService
+            seed_counts = AgriDataService(db).seed_reference_data()
+            if seed_counts["regions_created"] or seed_counts["crops_created"]:
+                print(
+                    "Agri reference data seeded: "
+                    f"{seed_counts['regions_created']} regions, "
+                    f"{seed_counts['crops_created']} crops"
+                )
+        except Exception as e:
+            db.rollback()
+            print(f"Error seeding agri reference data: {e}")
         print("Database initialized successfully!")
         
     except Exception as e:

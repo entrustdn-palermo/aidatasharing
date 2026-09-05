@@ -23,6 +23,7 @@ from .proxy_connector import (
 from .admin_config import (
     ConfigurationOverride, MindsDBConfiguration, ConfigurationHistory
 )
+from .agri import Region, Crop
 
 __all__ = [
     # SQLAlchemy base
@@ -56,5 +57,8 @@ __all__ = [
     "ProxyConnector", "SharedProxyLink", "ProxyAccessLog", "ProxyCredentialVault",
     
     # Admin config models
-    "ConfigurationOverride", "MindsDBConfiguration", "ConfigurationHistory"
+    "ConfigurationOverride", "MindsDBConfiguration", "ConfigurationHistory",
+
+    # Agricultural reference models
+    "Region", "Crop"
 ]
