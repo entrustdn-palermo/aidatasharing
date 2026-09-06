@@ -14,8 +14,8 @@ from datetime import datetime
 import logging
 
 from app.models.admin_config import (
-    ConfigurationOverride, 
-    MindsDBConfiguration, 
+    ConfigurationOverride,
+    MindsDBConfiguration,
     ConfigurationHistory,
     ConfigCategory,
     ConfigType
@@ -31,7 +31,8 @@ from app.schemas.admin_config import (
     ConfigurationApplicationResult
 )
 from app.core.config import settings
-from app.services.mindsdb import MindsDBService
+from app.services.agent_gateway import AgentGateway
+from app.services.mindsdb import MindsDBService, mindsdb_service as _default_mindsdb
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +40,9 @@ logger = logging.getLogger(__name__)
 class AdminConfigurationService:
     """Service for managing system configuration through admin panel"""
     
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, mindsdb_service: Optional[AgentGateway] = None):
         self.db = db
-        self.mindsdb_service = MindsDBService()
+        self.mindsdb_service: AgentGateway = mindsdb_service or _default_mindsdb
         
         # Default environment variable mappings
         self.env_var_mappings = {
@@ -618,7 +619,7 @@ class AdminConfigurationService:
                 return {"success": False, "error": "Configuration not found"}
             
             # Create temporary MindsDB service with this configuration
-            temp_service = MindsDBService()
+            temp_service: AgentGateway = MindsDBService()
             temp_service.base_url = config.mindsdb_url
             
             # Test connection

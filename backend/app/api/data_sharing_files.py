@@ -14,6 +14,7 @@ import logging
 
 from app.core.database import get_db
 from app.models.dataset import Dataset, DatasetFile
+from app.services.data_sharing import DataSharingService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -43,13 +44,8 @@ async def get_shared_dataset_files(
             detail="Shared dataset not found"
         )
     
-    # Check password if required
-    if dataset.share_password:
-        if not password or password != dataset.share_password:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid password"
-            )
+    service = DataSharingService(db)
+    service.require_share_password(dataset, password)
     
     # Check if it's a multi-file dataset
     if not dataset.is_multi_file_dataset:
@@ -108,13 +104,8 @@ async def download_individual_file(
             detail="Shared dataset not found or download not allowed"
         )
     
-    # Check password if required
-    if dataset.share_password:
-        if not password or password != dataset.share_password:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid password"
-            )
+    service = DataSharingService(db)
+    service.require_share_password(dataset, password)
     
     # Get the specific file
     dataset_file = db.query(DatasetFile).filter(
@@ -175,13 +166,8 @@ async def download_selected_files(
             detail="Shared dataset not found or download not allowed"
         )
     
-    # Check password if required
-    if dataset.share_password:
-        if not password or password != dataset.share_password:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid password"
-            )
+    service = DataSharingService(db)
+    service.require_share_password(dataset, password)
     
     # Get the selected files
     dataset_files = db.query(DatasetFile).filter(

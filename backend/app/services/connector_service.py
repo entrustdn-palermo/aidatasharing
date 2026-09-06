@@ -15,8 +15,11 @@ import os
 from sqlalchemy.orm import Session
 from app.models.dataset import DatabaseConnector, Dataset, DatasetType, DatasetStatus
 from app.models.organization import DataSharingLevel
-from app.services.mindsdb import MindsDBService
+from app.models.user import User
+from app.services.agent_gateway import AgentGateway
+from app.services.mindsdb import MindsDBService, mindsdb_service as _default_mindsdb
 from app.services.storage import storage_service
+from app.services.connector_config import SUPPORTED_CONNECTORS, DOCUMENT_PROCESSORS
 
 logger = logging.getLogger(__name__)
 
@@ -24,82 +27,15 @@ logger = logging.getLogger(__name__)
 class ConnectorService:
     """Enhanced service for managing data connectors and document processing"""
     
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, mindsdb_service: Optional[AgentGateway] = None):
         self.db = db
-        self.mindsdb_service = MindsDBService()
+        self.mindsdb_service: AgentGateway = mindsdb_service or _default_mindsdb
         
         # Supported connector types with their configurations
-        self.supported_connectors = {
-            'mysql': {
-                'required_config': ['host', 'port', 'database'],
-                'required_credentials': ['user', 'password'],
-                'optional_config': ['charset', 'ssl_disabled'],
-                'default_port': 3306
-            },
-            'postgresql': {
-                'required_config': ['host', 'port', 'database'],
-                'required_credentials': ['user', 'password'],
-                'optional_config': ['sslmode', 'connect_timeout'],
-                'default_port': 5432
-            },
-            's3': {
-                'required_config': ['bucket_name', 'region'],
-                'required_credentials': ['aws_access_key_id', 'aws_secret_access_key'],
-                'optional_config': ['endpoint_url', 'prefix'],
-                'default_region': 'us-east-1'
-            },
-            'mongodb': {
-                'required_config': ['host', 'port', 'database'],
-                'required_credentials': ['username', 'password'],
-                'optional_config': ['authSource', 'ssl'],
-                'default_port': 27017
-            },
-            'snowflake': {
-                'required_config': ['account', 'warehouse', 'database', 'schema'],
-                'required_credentials': ['user', 'password'],
-                'optional_config': ['role', 'timeout'],
-                'default_schema': 'PUBLIC'
-            },
-            'bigquery': {
-                'required_config': ['project_id', 'dataset_id'],
-                'required_credentials': ['service_account_json'],
-                'optional_config': ['location'],
-                'default_location': 'US'
-            },
-            'redshift': {
-                'required_config': ['host', 'port', 'database'],
-                'required_credentials': ['user', 'password'],
-                'optional_config': ['sslmode'],
-                'default_port': 5439
-            },
-            'clickhouse': {
-                'required_config': ['host', 'port', 'database'],
-                'required_credentials': ['user', 'password'],
-                'optional_config': ['secure', 'verify'],
-                'default_port': 8123
-            },
-            'api': {
-                'required_config': ['base_url', 'endpoint'],
-                'required_credentials': [],
-                'optional_config': ['headers', 'auth_type', 'timeout'],
-                'default_timeout': 30
-            },
-            'file_system': {
-                'required_config': ['path'],
-                'required_credentials': [],
-                'optional_config': ['file_pattern', 'recursive'],
-                'default_recursive': False
-            }
-        }
-        
-        # Document processing capabilities
+        self.supported_connectors = SUPPORTED_CONNECTORS
         self.document_processors = {
-            'pdf': self._process_pdf_document,
-            'docx': self._process_docx_document,
-            'doc': self._process_doc_document,
-            'txt': self._process_txt_document,
-            'rtf': self._process_rtf_document,
-            'odt': self._process_odt_document
+            ext: getattr(self, method_name)
+            for ext, method_name in DOCUMENT_PROCESSORS.items()
         }
     
     async def create_connector_dataset(
@@ -116,18 +52,18 @@ class ConnectorService:
             # Validate connector is active and tested
             if not connector.is_active:
                 raise Exception("Connector is not active")
-            
+
             if connector.test_status != "success":
                 raise Exception("Connector has not been successfully tested")
-            
+
             # Create MindsDB database connection if not exists
             mindsdb_result = await self._create_mindsdb_connection(connector)
             if not mindsdb_result.get("success"):
                 raise Exception(f"Failed to create MindsDB connection: {mindsdb_result.get('error')}")
-            
+
             # Determine dataset type based on connector
             dataset_type = self._get_dataset_type_for_connector(connector.connector_type)
-            
+
             # Determine the correct table name for MindsDB queries
             if connector.connector_type == 'web':
                 # For web connectors, the table name is typically the same as the database name
@@ -135,6 +71,9 @@ class ConnectorService:
                 source_reference = connector.connection_config.get('base_url', '') + connector.connection_config.get('endpoint', '')
             else:
                 # For other connectors, use the provided table_or_query
+                # SECURITY: Validate identifier to prevent SQL injection
+                if not self.mindsdb_service.is_safe_mindsdb_identifier(table_or_query):
+                    raise Exception(f"Invalid table name: '{table_or_query}' contains unsafe characters")
                 mindsdb_table_name = table_or_query
                 source_reference = table_or_query
             
@@ -363,17 +302,22 @@ class ConnectorService:
     async def _get_connector_schema(self, connector: DatabaseConnector, table_name: str) -> Optional[Dict[str, Any]]:
         """Get schema information from connector source"""
         try:
+            # SECURITY: Validate identifier to prevent SQL injection
+            if not self.mindsdb_service.is_safe_mindsdb_identifier(table_name):
+                logger.error(f"Unsafe table name rejected: '{table_name}'")
+                return None
+
             if connector.connector_type in ['mysql', 'postgresql']:
                 # Get table schema using DESCRIBE or INFORMATION_SCHEMA
                 if connector.connector_type == 'mysql':
                     schema_query = f"DESCRIBE {connector.mindsdb_database_name}.{table_name}"
                 else:  # postgresql
                     schema_query = f"""
-                    SELECT column_name, data_type 
-                    FROM {connector.mindsdb_database_name}.information_schema.columns 
+                    SELECT column_name, data_type
+                    FROM {connector.mindsdb_database_name}.information_schema.columns
                     WHERE table_name = '{table_name}'
                     """
-                
+
                 logger.info(f"🔍 Getting schema for {table_name}: {schema_query}")
                 result = self.mindsdb_service.execute_query(schema_query)
                 
@@ -719,33 +663,33 @@ class ConnectorService:
             }
     
     async def _create_document_chat_model(self, dataset: Dataset, text_content: str) -> Dict[str, Any]:
-        """Create MindsDB model for document chat"""
+        """Create MindsDB agent for document chat (agent-based architecture)"""
         try:
-            model_name = f"doc_chat_{dataset.id}"
-            
-            # Create a simple chat model for the document
-            result = self.mindsdb_service.create_gemini_model(
-                model_name=model_name,
-                model_type="chat",
-                column_name="question"
-            )
-            
-            if result.get("status") in ["created", "exists"]:
-                # Update dataset with model information
-                dataset.chat_model_name = model_name
+            # Use agent-based approach instead of model creation
+            logger.info(f"Setting up agent for document chat on dataset {dataset.id}")
+
+            # Create agent for single-file dataset
+            if dataset.is_multi_file_dataset:
+                result = self.mindsdb_service.setup_multi_file_agent(dataset, self.db)
+            else:
+                result = self.mindsdb_service.setup_single_file_agent(dataset, self.db)
+
+            if result.get("success"):
+                # Update dataset with agent information
+                dataset.agent_name = result.get("agent_name")
                 dataset.ai_chat_enabled = True
                 dataset.chat_context = {
                     "document_content": text_content[:2000],  # First 2000 chars for context
-                    "model_name": model_name,
+                    "agent_name": result.get("agent_name"),
                     "created_at": datetime.utcnow().isoformat()
                 }
                 self.db.commit()
-                
-                logger.info(f"✅ Created document chat model: {model_name}")
-                return {"success": True, "model_name": model_name}
-            
-            return {"success": False, "error": "Model creation failed"}
-            
+
+                logger.info(f"✅ Created document chat agent: {result.get('agent_name')}")
+                return {"success": True, "agent_name": result.get("agent_name")}
+
+            return {"success": False, "error": result.get("error", "Agent creation failed")}
+
         except Exception as e:
             logger.error(f"❌ Failed to create document chat model: {e}")
             return {"success": False, "error": str(e)}
@@ -1006,3 +950,229 @@ class ConnectorService:
                 "success": False,
                 "error": str(e)
             }
+
+    async def list_connectors(
+        self,
+        user: User,
+        connector_type: Optional[str] = None,
+        active_only: bool = True,
+        include_datasets: bool = False,
+    ) -> List[Any]:
+        """List database connectors for the current organization."""
+        if not user.organization_id:
+            raise ValueError("Must belong to an organization")
+
+        query = self.db.query(DatabaseConnector).filter(
+            DatabaseConnector.organization_id == user.organization_id,
+            DatabaseConnector.is_deleted == False
+        )
+
+        if active_only:
+            query = query.filter(DatabaseConnector.is_active == True)
+
+        if connector_type:
+            query = query.filter(DatabaseConnector.connector_type == connector_type)
+
+        connectors = query.order_by(DatabaseConnector.created_at.desc()).all()
+
+        if include_datasets:
+            from app.api.data_connectors import DatabaseConnectorResponse, DatasetInfo
+
+            result = []
+            for connector in connectors:
+                datasets = self.db.query(Dataset).filter(
+                    Dataset.connector_id == connector.id,
+                    Dataset.is_deleted == False
+                ).all()
+
+                dataset_infos = [
+                    DatasetInfo(
+                        id=ds.id, name=ds.name,
+                        type=ds.type.value,
+                        sharing_level=ds.sharing_level.value,
+                        public_share_enabled=ds.public_share_enabled
+                    )
+                    for ds in datasets
+                ]
+
+                connector_response = DatabaseConnectorResponse(
+                    id=connector.id, name=connector.name,
+                    connector_type=connector.connector_type,
+                    description=connector.description,
+                    is_active=connector.is_active,
+                    test_status=connector.test_status,
+                    last_tested_at=connector.last_tested_at,
+                    created_at=connector.created_at,
+                    mindsdb_database_name=connector.mindsdb_database_name,
+                    organization_id=connector.organization_id,
+                    datasets=dataset_infos
+                )
+                result.append(connector_response)
+            return result
+
+        return connectors
+
+    async def update_connector(
+        self,
+        connector_id: int,
+        connector_update,
+        user: User,
+    ):
+        """Update an existing database connector."""
+        if not user.organization_id:
+            raise ValueError("Must belong to an organization")
+
+        connector = self.db.query(DatabaseConnector).filter(
+            DatabaseConnector.id == connector_id,
+            DatabaseConnector.organization_id == user.organization_id,
+            DatabaseConnector.is_deleted == False
+        ).first()
+
+        if not connector:
+            raise ValueError("Connector not found")
+
+        if not getattr(connector, 'is_editable', True):
+            raise ValueError("This connector is not editable")
+
+        update_data = connector_update.dict(exclude_unset=True)
+        for field, value in update_data.items():
+            setattr(connector, field, value)
+
+        if connector_update.connection_config or connector_update.credentials:
+            connector.test_status = "untested"
+            connector.test_error = None
+            connector.last_tested_at = None
+
+        connector.updated_at = datetime.utcnow()
+
+        try:
+            self.db.commit()
+            self.db.refresh(connector)
+            return connector
+        except Exception as e:
+            self.db.rollback()
+            raise
+
+    async def test_connector_connection(self, connector_id: int, user: User) -> Dict[str, Any]:
+        """Test the connection for a database connector and update its status."""
+        if not user.organization_id:
+            raise ValueError("Must belong to an organization")
+
+        connector = self.db.query(DatabaseConnector).filter(
+            DatabaseConnector.id == connector_id,
+            DatabaseConnector.organization_id == user.organization_id,
+            DatabaseConnector.is_deleted == False
+        ).first()
+
+        if not connector:
+            raise ValueError("Connector not found")
+
+        test_result = await self.test_connection(connector)
+
+        connector.test_status = "success" if test_result["success"] else "failed"
+        connector.test_error = test_result.get("error")
+        connector.last_tested_at = datetime.utcnow()
+        self.db.commit()
+
+        return {
+            "success": test_result["success"],
+            "message": test_result.get("message", "Connection test completed"),
+            "error": test_result.get("error"),
+            "test_time": connector.last_tested_at.isoformat(),
+            "connection_details": test_result.get("details", {})
+        }
+
+    async def sync_connector_data_by_id(self, connector_id: int, user: User, force: bool = False) -> Dict[str, Any]:
+        """Manually sync data from a real-time enabled connector."""
+        if not user.organization_id:
+            raise ValueError("Must belong to an organization")
+
+        connector = self.db.query(DatabaseConnector).filter(
+            DatabaseConnector.id == connector_id,
+            DatabaseConnector.organization_id == user.organization_id,
+            DatabaseConnector.is_deleted == False
+        ).first()
+
+        if not connector:
+            raise ValueError("Connector not found")
+
+        if not getattr(connector, 'supports_real_time', False) and not force:
+            raise ValueError("Real-time sync not supported for this connector. Use force=true to override.")
+
+        sync_result = await self.sync_connector_data(connector)
+
+        connector.last_synced_at = datetime.utcnow()
+        self.db.commit()
+
+        return {
+            "success": sync_result["success"],
+            "message": sync_result.get("message", "Data sync completed"),
+            "records_synced": sync_result.get("records_synced", 0),
+            "sync_time": connector.last_synced_at.isoformat(),
+            "details": sync_result.get("details", {})
+        }
+
+    async def delete_connector(self, connector_id: int, user: User, force_delete: bool = False) -> Dict[str, Any]:
+        """Delete a database connector."""
+        if not user.organization_id:
+            raise ValueError("Must belong to an organization")
+
+        connector = self.db.query(DatabaseConnector).filter(
+            DatabaseConnector.id == connector_id,
+            DatabaseConnector.organization_id == user.organization_id,
+            DatabaseConnector.is_deleted == False
+        ).first()
+
+        if not connector:
+            raise ValueError("Connector not found")
+
+        affected_datasets = self.db.query(Dataset).filter(
+            Dataset.connector_id == connector_id,
+            Dataset.is_deleted == False
+        ).all()
+
+        disabled_sharing_count = 0
+        disabled_proxy_count = 0
+
+        mindsdb_service_inst: AgentGateway = MindsDBService()
+
+        for dataset in affected_datasets:
+            if dataset.agent_name:
+                try:
+                    mindsdb_service_inst.delete_dataset_agent(dataset, self.db)
+                except Exception as e:
+                    logger.warning(f"Failed to delete agent for dataset {dataset.id}: {e}")
+
+            if dataset.public_share_enabled:
+                dataset.public_share_enabled = False
+                dataset.share_token = None
+                dataset.share_password = None
+                dataset.ai_chat_enabled = False
+                disabled_sharing_count += 1
+
+            try:
+                from app.models.proxy_connector import ProxyConnector
+                proxy_connectors = self.db.query(ProxyConnector).filter(
+                    ProxyConnector.name == dataset.name,
+                    ProxyConnector.organization_id == dataset.organization_id,
+                    ProxyConnector.is_active == True
+                ).all()
+                for proxy_connector in proxy_connectors:
+                    proxy_connector.is_active = False
+                    disabled_proxy_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to disable proxy connectors for dataset {dataset.id}: {e}")
+
+        if force_delete and user.is_superuser:
+            self.db.delete(connector)
+        else:
+            connector.soft_delete(user.id)
+
+        self.db.commit()
+
+        return {
+            "message": "Connector deleted successfully",
+            "affected_datasets": len(affected_datasets),
+            "disabled_sharing": disabled_sharing_count,
+            "disabled_proxy_connectors": disabled_proxy_count
+        }

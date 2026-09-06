@@ -5,22 +5,7 @@ import { ProtectedRoute } from '@/components/auth/ProtectedRoute';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { adminAPI } from '@/lib/api';
 import Link from 'next/link';
-import {
-  Users,
-  Building,
-  Settings,
-  Plus,
-  Edit,
-  Trash2,
-  Eye,
-  Search,
-  Filter,
-  X,
-  Save,
-  Calendar,
-  Mail,
-  Globe
-} from 'lucide-react';
+import {Users, Building, Plus, Edit, Trash2, Eye, Search, Filter, X, Save, Calendar, Mail, Globe} from 'lucide-react';
 
 interface Organization {
   id: string;

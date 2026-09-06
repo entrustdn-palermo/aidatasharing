@@ -34,6 +34,7 @@ odfpy==1.4.1
 pymysql==1.1.1  # Updated from 1.1.0 to fix CVE-2024-36039 SQL injection
 mysql-connector-python==9.2.0
 boto3==1.38.44
+aioboto3==13.2.0  # Async version of boto3 for S3 operations
 google-cloud-bigquery==3.17.2
 clickhouse-driver==0.2.9
 
@@ -41,8 +42,7 @@ clickhouse-driver==0.2.9
 google-generativeai==0.8.3
 openai==1.91.0
 dspy-ai==2.4.9
-# MindsDB SDK
-mindsdb-sdk==2.0.0
+mindsdb-sdk>=3.5.0
 
 # Data visualization and analysis
 lida==0.0.13

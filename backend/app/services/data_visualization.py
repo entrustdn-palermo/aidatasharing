@@ -13,6 +13,9 @@ import numpy as np
 from datetime import datetime
 import traceback
 
+if not hasattr(np, "unicode_"):
+    np.unicode_ = np.str_
+
 # Visualization libraries
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
@@ -31,6 +34,31 @@ except ImportError:
     logging.warning("LIDA not available. Install with: pip install lida")
 
 logger = logging.getLogger(__name__)
+
+
+def sanitize_visualization_payload(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {str(k): sanitize_visualization_payload(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize_visualization_payload(item) for item in obj]
+    if isinstance(obj, tuple):
+        return [sanitize_visualization_payload(item) for item in obj]
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.ndarray):
+        return sanitize_visualization_payload(obj.tolist())
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    try:
+        if bool(pd.isna(obj)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return obj
 
 
 class DataVisualizationService:
@@ -239,6 +267,42 @@ class DataVisualizationService:
             logger.error(f"LIDA visualization generation failed: {e}")
             return self.generate_standard_visualizations(data)
     
+    def generate_chat_visualizations(
+        self,
+        data: pd.DataFrame,
+        query: str = "",
+        max_visualizations: int = 3
+    ) -> List[Dict[str, Any]]:
+        visualizations = self.generate_standard_visualizations(data)
+        if not visualizations:
+            return []
+
+        query_lower = query.lower()
+        priority_map = []
+        if any(word in query_lower for word in ["trend", "time", "over time", "line"]):
+            priority_map.extend(["time_series", "line"])
+        if any(word in query_lower for word in ["distribution", "histogram", "spread"]):
+            priority_map.extend(["distribution", "box_plot"])
+        if any(word in query_lower for word in ["correlation", "relationship", "heatmap"]):
+            priority_map.extend(["heatmap", "scatter"])
+        if any(word in query_lower for word in ["compare", "category", "bar", "top"]):
+            priority_map.extend(["bar_chart", "grouped_bar"])
+        if "pie" in query_lower or "share" in query_lower:
+            priority_map.append("pie_chart")
+
+        if priority_map:
+            def score(viz: Dict[str, Any]) -> int:
+                viz_type = str(viz.get("type", "")).lower()
+                title = str(viz.get("title", "")).lower()
+                for index, keyword in enumerate(priority_map):
+                    if keyword in viz_type or keyword in title:
+                        return index
+                return len(priority_map)
+
+            visualizations = sorted(visualizations, key=score)
+
+        return visualizations[:max(1, max_visualizations)]
+
     def generate_standard_visualizations(self, data: pd.DataFrame) -> List[Dict[str, Any]]:
         """Generate enhanced standard visualizations with more chart types"""
         visualizations = []

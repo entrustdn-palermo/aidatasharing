@@ -21,6 +21,7 @@ os.environ['STORAGE_TYPE'] = 'local'
 os.environ['STORAGE_DIR'] = tempfile.mkdtemp()
 
 from app.services.storage import StorageService, storage_service
+from app.services.download_token import download_token_service
 
 class ComprehensiveStorageTest:
     """Comprehensive test for storage service implementation"""
@@ -170,8 +171,8 @@ class ComprehensiveStorageTest:
                 dataset_id = 1  # We used dataset_id=1 when storing
                 user_id = 1     # We used this for the test
                 
-                token = service.generate_download_token(dataset_id, user_id)
-                is_valid = service.validate_download_token(token)
+                token = download_token_service.generate(dataset_id, user_id)
+                is_valid = download_token_service.validate(token)
                 if not is_valid:
                     raise Exception(f"Download token validation failed for {result['filename']}")
                 print(f"✓ Download token valid for {result['original_filename']}")

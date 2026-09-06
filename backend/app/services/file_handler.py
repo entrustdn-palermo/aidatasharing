@@ -7,7 +7,7 @@ Enhanced with permanent storage capabilities
 import os
 import hashlib
 import mimetypes
-from typing import Dict, List, Optional, Any, BinaryIO
+from typing import Dict, List, Optional, Any
 from sqlalchemy.orm import Session
 from fastapi import UploadFile
 import logging
@@ -16,7 +16,9 @@ from datetime import datetime
 from app.models.file_handler import FileUpload, MindsDBHandler, FileProcessingLog, UploadStatus, ProcessingStatus, FileType
 from app.models.dataset import Dataset
 from app.models.user import User
-from app.services.mindsdb import MindsDBService
+from app.services.agent_gateway import AgentGateway
+from app.services.mindsdb import MindsDBService, mindsdb_service as _default_mindsdb
+from app.services.file_handler_base import FileHandlerBase
 from app.services.file_handler_permanent import PermanentFileHandlerService
 from app.services.image_processing import ImageProcessingService
 from app.services.pdf_processing import PDFProcessingService
@@ -26,34 +28,22 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
-class FileHandlerService:
+class FileHandlerService(FileHandlerBase):
     """Service for handling file uploads and MindsDB integration with permanent storage support"""
-    
-    def __init__(self, db: Session, use_permanent_storage: bool = True):
-        self.db = db
-        self.mindsdb_service = MindsDBService()
+
+    def __init__(self, db: Session, use_permanent_storage: bool = True, mindsdb_service: Optional[AgentGateway] = None):
+        super().__init__(db)
+        self.mindsdb_service: AgentGateway = mindsdb_service or _default_mindsdb
         self.use_permanent_storage = use_permanent_storage
-        
+
         # Initialize services
         if self.use_permanent_storage:
             self.permanent_service = PermanentFileHandlerService(db)
-        
+
         self.image_service = ImageProcessingService(db)
         self.pdf_service = PDFProcessingService(db)
         self.universal_processor = UniversalFileProcessor(db)
-        
-        # Legacy local storage setup (for backward compatibility)
-        self.upload_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
-        os.makedirs(self.upload_dir, exist_ok=True)
-    
-    def calculate_file_hash(self, file_content: bytes) -> str:
-        """Calculate SHA-256 hash of file content"""
-        return hashlib.sha256(file_content).hexdigest()
-    
-    def get_file_mime_type(self, filename: str) -> Optional[str]:
-        """Get MIME type for file"""
-        mime_type, _ = mimetypes.guess_type(filename)
-        return mime_type
+
     def determine_file_type(self, filename: str, mime_type: str = None) -> str:
         """Determine file type based on filename and MIME type"""
         # Check for images first
@@ -83,92 +73,13 @@ class FileHandlerService:
         return FileType.OTHER.value
     
     async def save_uploaded_file(self, file: UploadFile, user: User, dataset: Dataset) -> FileUpload:
-        """Save uploaded file using permanent storage or legacy local storage"""
+        """Save uploaded file via universal processor"""
         try:
-            # Determine file type
-            mime_type = self.get_file_mime_type(file.filename)
-            file_type = self.determine_file_type(file.filename, mime_type)
-            
-            # Use universal processor for all file types
             logger.info(f"Processing file with universal processor: {file.filename}")
             return await self.universal_processor.process_file(file, user, dataset)
-            
-            # Handle other file types with existing logic
-            if self.use_permanent_storage:
-                # Use permanent storage
-                logger.info(f"Using MindsDB permanent storage for file: {file.filename}")
-                result = self.permanent_service.upload_file_to_permanent_storage(file, user, dataset)
-                
-                if result["success"]:
-                    # Get the created file upload record
-                    file_upload = self.db.query(FileUpload).filter(
-                        FileUpload.mindsdb_file_id == result["mindsdb_file_id"]
-                    ).first()
-                    
-                    if file_upload:
-                        # Update file type
-                        file_upload.file_type = file_type
-                        self.db.commit()
-                        logger.info(f"File uploaded to permanent storage successfully: {file.filename}")
-                        return file_upload
-                    else:
-                        raise Exception("File upload record not found after permanent storage upload")
-                else:
-                    raise Exception(f"Permanent storage upload failed: {result.get('error')}")
-            else:
-                # Use legacy local storage
-                logger.info(f"Using legacy local storage for file: {file.filename}")
-                return self._save_uploaded_file_local(file, user, dataset, file_type)
-                
         except Exception as e:
             logger.error(f"File upload failed: {str(e)}")
             raise
-    
-    def _save_uploaded_file_local(self, file: UploadFile, user: User, dataset: Dataset, file_type: str) -> FileUpload:
-        """Save uploaded file to local storage (legacy method)"""
-        # Read file content
-        file_content = file.file.read()
-        file_size = len(file_content)
-        file_hash = self.calculate_file_hash(file_content)
-        
-        # Generate unique filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_filename = f"{timestamp}_{user.id}_{file.filename}"
-        file_path = os.path.join(self.upload_dir, safe_filename)
-        
-        # Save file to disk
-        with open(file_path, "wb") as f:
-            f.write(file_content)
-        
-        # Create tracking record
-        file_upload = FileUpload(
-            dataset_id=dataset.id,
-            user_id=user.id,
-            organization_id=user.organization_id,
-            original_filename=file.filename,
-            file_path=file_path,
-            file_size=file_size,
-            file_hash=file_hash,
-            mime_type=self.get_file_mime_type(file.filename),
-            file_type=file_type,
-            upload_status=UploadStatus.UPLOADED
-        )
-        
-        self.db.add(file_upload)
-        self.db.commit()
-        self.db.refresh(file_upload)
-        
-        # Log the upload
-        self.log_processing_step(
-            file_upload.id,
-            "file_upload",
-            "completed",
-            f"File uploaded successfully to local storage: {file.filename}",
-            {"file_size": file_size, "file_hash": file_hash}
-        )
-        
-        logger.info(f"File uploaded to local storage: {file.filename} -> {safe_filename}")
-        return file_upload
     
     def process_file_with_mindsdb(self, file_upload: FileUpload) -> Dict[str, Any]:
         """Process uploaded file with MindsDB (supports both permanent and local storage)"""
@@ -559,124 +470,15 @@ class FileHandlerService:
                 "error": str(e)
             }
     
-    def log_processing_step(
-        self,
-        file_upload_id: int,
-        step: str,
-        status: str,
-        message: str,
-        details: Optional[Dict[str, Any]] = None,
-        processing_time_ms: Optional[int] = None
-    ):
-        """Log a processing step"""
-        try:
-            log_entry = FileProcessingLog(
-                file_upload_id=file_upload_id,
-                step=step,
-                status=status,
-                message=message,
-                details=details,
-                processing_time_ms=processing_time_ms
-            )
-            
-            self.db.add(log_entry)
-            self.db.commit()
-            
-        except Exception as e:
-            logger.error(f"Failed to log processing step: {str(e)}")
-    
-    def get_file_upload_status(self, file_upload_id: int) -> Optional[Dict[str, Any]]:
-        """Get file upload status and processing logs (supports both storage types)"""
-        file_upload = self.db.query(FileUpload).filter(
-            FileUpload.id == file_upload_id
-        ).first()
-        
-        if not file_upload:
-            return None
-        
-        # Get processing logs
-        logs = self.db.query(FileProcessingLog).filter(
-            FileProcessingLog.file_upload_id == file_upload_id
-        ).order_by(FileProcessingLog.created_at).all()
-        
-        # Determine storage type
-        storage_type = "permanent" if file_upload.file_path.startswith("mindsdb://permanent_storage/") else "local"
-        
-        status_info = {
-            "id": file_upload.id,
-            "original_filename": file_upload.original_filename,
-            "file_size": file_upload.file_size,
-            "upload_status": file_upload.upload_status,
-            "mindsdb_file_id": file_upload.mindsdb_file_id,
-            "storage_type": storage_type,
-            "processing_started_at": file_upload.processing_started_at,
-            "processing_completed_at": file_upload.processing_completed_at,
-            "error_message": file_upload.error_message,
-            "created_at": file_upload.created_at,
-            "processing_logs": [
-                {
-                    "step": log.step,
-                    "status": log.status,
-                    "message": log.message,
-                    "details": log.details,
-                    "processing_time_ms": log.processing_time_ms,
-                    "created_at": log.created_at
-                }
-                for log in logs
-            ]
-        }
-        
-        # Add storage-specific information
-        if storage_type == "permanent":
-            status_info["storage_path"] = getattr(file_upload, 'mindsdb_storage_path', None)
-        else:
-            status_info["file_path"] = file_upload.file_path
-        
-        return status_info
-    
-    def get_organization_handlers(self, organization_id: int) -> List[Dict[str, Any]]:
-        """Get all MindsDB handlers for an organization (both storage types)"""
-        handlers = self.db.query(MindsDBHandler).filter(
-            MindsDBHandler.organization_id == organization_id,
-            MindsDBHandler.is_active == True
-        ).all()
-        
-        handler_list = []
-        for handler in handlers:
-            handler_info = {
-                "id": handler.id,
-                "handler_name": handler.handler_name,
-                "handler_type": handler.handler_type,
-                "configuration": handler.configuration,
-                "created_at": handler.created_at,
-                "updated_at": handler.updated_at
-            }
-            
-            # Determine storage type from handler type or configuration
-            if handler.handler_type == "permanent_file":
-                handler_info["storage_type"] = "permanent"
-            elif handler.handler_type == "file":
-                handler_info["storage_type"] = "local"
-            else:
-                # Check configuration for storage type
-                config = handler.configuration or {}
-                if config.get("storage_type") == "permanent":
-                    handler_info["storage_type"] = "permanent"
-                else:
-                    handler_info["storage_type"] = "local"
-            
-            handler_list.append(handler_info)
-        
-        return handler_list
     def execute_query(self, query: str) -> Dict[str, Any]:
         """Execute a query using MindsDB service"""
         try:
-            if not self.mindsdb_service._ensure_connection():
+            if not self.mindsdb_service.ensure_connection():
                 return {
                     "error": "MindsDB connection not available"
                 }
-            
-            result = self.mindsdb_service.connection.query(query)
+
+            result = self.mindsdb_service.execute_raw_query(query)
             
             if result:
                 try:

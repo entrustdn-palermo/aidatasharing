@@ -99,6 +99,13 @@ class Dataset(Base):
     ai_chat_enabled = Column(Boolean, default=True)
     chat_model_name = Column(String, nullable=True)  # Gemini model used for chat
     chat_context = Column(JSON, nullable=True)  # Context for AI chat
+
+    # Agent-based AI Configuration (New architecture)
+    agent_name = Column(String, nullable=True)  # MindsDB agent name for this dataset
+    agent_created_at = Column(DateTime, nullable=True)  # When the agent was created
+    agent_last_updated = Column(DateTime, nullable=True)  # Last agent update
+    chat_model_provider = Column(String, nullable=True)  # LLM provider: 'google', 'openai', 'anthropic'
+    chat_model_config = Column(JSON, nullable=True)  # Additional model parameters
     
     # Access control within organization
     allow_download = Column(Boolean, default=True)
@@ -126,6 +133,14 @@ class Dataset(Base):
     # Download tracking
     download_count = Column(Integer, default=0)  # Total number of downloads
     last_downloaded_at = Column(DateTime, nullable=True)  # Last download timestamp
+
+    # Agricultural tags (wizard upload): dataset-level in v1.
+    # region_id/crop_id stay resolvable even after the reference entry is
+    # deactivated — historical tags never break.
+    region_id = Column(Integer, ForeignKey("agri_regions.id"), nullable=True, index=True)
+    crop_id = Column(Integer, ForeignKey("agri_crops.id"), nullable=True, index=True)
+    season = Column(String(50), nullable=True)  # Growing season the records cover
+    yield_column = Column(String(255), nullable=True)  # User-confirmed numeric yield column
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -236,7 +251,9 @@ class DatasetModel(Base):
     __tablename__ = "dataset_models"
 
     id = Column(Integer, primary_key=True, index=True)
-    dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=False)
+    # Nullable since the pooled crop classifier: a model trained over the
+    # whole cross-org pool belongs to no single Dataset (ADR-0001).
+    dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=True)
     name = Column(String, nullable=False)
     model_type = Column(String, nullable=False)  # 'predictor', 'classifier', 'chat', 'embedding'
     mindsdb_model_name = Column(String, nullable=False)

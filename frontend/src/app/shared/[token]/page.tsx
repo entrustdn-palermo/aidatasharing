@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import { dataSharingAPI } from '@/lib/api';
-import { Eye, Download, MessageSquare, Lock, User, Database, Shield, Copy } from 'lucide-react';
+import { Eye, Download, MessageSquare, Lock, User, Database, Shield, Copy, BarChart3 } from 'lucide-react';
 import { DataVisualization } from '@/components/DataVisualization';
 import { MarkdownRenderer } from '@/components/MarkdownRenderer';
 import apiConfig from '@/config/api.config';
@@ -47,8 +47,12 @@ export default function SharedDatasetPage() {
   const [showChat, setShowChat] = useState(false);
   const [chatMessage, setChatMessage] = useState('');
   const [chatHistory, setChatHistory] = useState<any[]>([]);
+  const [chatSessionToken, setChatSessionToken] = useState<string | undefined>();
   const [isChatting, setIsChatting] = useState(false);
-  
+  const [antonAnalysis, setAntonAnalysis] = useState<any>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+
   // File manager state
   const [files, setFiles] = useState<any[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<Set<number>>(new Set());
@@ -59,20 +63,34 @@ export default function SharedDatasetPage() {
     try {
       setIsLoading(true);
       setError(null);
-      
-      // Try public access first
+
+      const info = await dataSharingAPI.getSharedDatasetInfo(token);
+      if (info.password_protected) {
+        setDataset({
+          dataset_id: 0,
+          dataset_name: info.name,
+          description: info.description,
+          file_type: info.type,
+          size_bytes: info.size_bytes,
+          row_count: info.row_count,
+          column_count: info.column_count,
+          access_allowed: false,
+          requires_password: true,
+          enable_chat: info.chat_enabled
+        });
+        setShowPasswordForm(true);
+        return;
+      }
+
       const response = await dataSharingAPI.getPublicSharedDataset(token);
       setDataset(response);
-      
-      if (response.requires_password && !response.access_allowed) {
-        setShowPasswordForm(true);
-      }
+      setShowPasswordForm(false);
+      const session = await dataSharingAPI.createChatSession(token, password || undefined);
+      setChatSessionToken(session.session_token);
     } catch (error: any) {
       console.error('Failed to fetch shared dataset:', error);
       if (error.response?.status === 404) {
         setError('Shared dataset not found or no longer available');
-      } else if (error.response?.status === 401) {
-        setError('Access denied. This dataset may require authentication.');
       } else {
         setError(error.response?.data?.detail || 'Failed to access shared dataset');
       }
@@ -94,10 +112,12 @@ export default function SharedDatasetPage() {
       setIsAuthenticating(true);
       setError(null);
       
-      // Try public access with password
       const response = await dataSharingAPI.getPublicSharedDataset(token, password);
       setDataset(response);
       setShowPasswordForm(false);
+      const session = await dataSharingAPI.createChatSession(token, password || undefined);
+      setChatSessionToken(session.session_token);
+      setError(null);
     } catch (error: any) {
       console.error('Password authentication failed:', error);
       setError(error.response?.data?.detail || 'Invalid password');
@@ -186,10 +206,10 @@ export default function SharedDatasetPage() {
 
   const handleChat = async () => {
     if (!chatMessage.trim() || !token) return;
-    
+
     const userMessage = chatMessage.trim();
     setChatMessage('');
-    
+
     // Add user message to history
     const newUserMessage = {
       id: Date.now(),
@@ -198,18 +218,45 @@ export default function SharedDatasetPage() {
       timestamp: new Date().toISOString()
     };
     setChatHistory(prev => [...prev, newUserMessage]);
-    
+
     try {
       setIsChatting(true);
-      const response = await dataSharingAPI.chatWithSharedDataset(token, userMessage);
-      
+      let sessionToken = chatSessionToken;
+      if (!sessionToken) {
+        const session = await dataSharingAPI.createChatSession(token, password || undefined);
+        sessionToken = session.session_token;
+        setChatSessionToken(sessionToken);
+      }
+      const response = await dataSharingAPI.chatWithSharedDataset(token, userMessage, sessionToken, password || undefined);
+
+      // Parse MindsDB agent response if present
+      let answerText = response.answer || response.response || 'No response received';
+
+      // Handle AgentCompletion format from MindsDB
+      if (typeof answerText === 'string' && answerText.includes('AgentCompletion')) {
+        // Extract content from AgentCompletion(content: "...", ...)
+        const contentMatch = answerText.match(/content:\s*["`'](.+?)["`']/) ||
+                            answerText.match(/content:\s*(.+?)(?:,|\))/);
+        if (contentMatch) {
+          answerText = contentMatch[1].trim();
+        } else {
+          // Fallback: try to extract text between quotes
+          const simpleMatch = answerText.match(/["'](.+?)["']/);
+          if (simpleMatch) {
+            answerText = simpleMatch[1];
+          }
+        }
+      }
+
       // Add AI response to history
       const aiMessage = {
         id: Date.now() + 1,
         type: 'ai',
-        message: response.answer || response.response || 'No response received',
+        message: answerText,
         timestamp: new Date().toISOString(),
         model: response.model,
+        source: response.source, // Track if using agent or fallback
+        agent_name: response.agent_name, // Track agent name
         tokens_used: response.tokens_used,
         visualizations: response.visualizations,
         dataAnalysis: response.data_analysis,
@@ -217,10 +264,10 @@ export default function SharedDatasetPage() {
         error: false
       };
       setChatHistory(prev => [...prev, aiMessage]);
-      
+
     } catch (error: any) {
       console.error('Chat failed:', error);
-      
+
       // Add error message to history
       const errorMessage = {
         id: Date.now() + 1,
@@ -238,7 +285,27 @@ export default function SharedDatasetPage() {
   const clearChat = () => {
     setChatHistory([]);
   };
-  
+
+  const handleAntonAnalyze = async (query?: string) => {
+    if (!token) return;
+
+    try {
+      setIsAnalyzing(true);
+      setAnalysisError(null);
+      const response = await dataSharingAPI.analyzeSharedDataset(token, {
+        query,
+        password: password || undefined,
+        max_visualizations: 3
+      });
+      setAntonAnalysis(response);
+    } catch (error: any) {
+      console.error('Anton analysis failed:', error);
+      setAnalysisError(error.response?.data?.detail || 'Anton could not analyze this shared dataset. Please try again.');
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
   // Fetch files list for multi-file datasets
   const fetchFiles = useCallback(async () => {
     if (!dataset?.preview_data?.type || dataset.preview_data.type !== 'multi_file') return;
@@ -329,6 +396,14 @@ export default function SharedDatasetPage() {
         return ['READ'];
     }
   };
+
+  const antonPrompts = [
+    'Give me an executive summary',
+    'Find data quality issues',
+    'Show key distributions and outliers',
+    'Find correlations or relationships',
+    'Create charts for important patterns'
+  ];
 
   if (isLoading) {
     return (
@@ -445,13 +520,23 @@ export default function SharedDatasetPage() {
                   </button>
                 )}
                 {dataset.enable_chat && (
-                  <button 
-                    onClick={() => setShowChat(!showChat)}
-                    className="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                  >
-                    <MessageSquare className="h-4 w-4 mr-2" />
-                    {showChat ? 'Hide Chat' : 'Chat with Data'}
-                  </button>
+                  <>
+                    <button
+                      onClick={() => handleAntonAnalyze()}
+                      disabled={isAnalyzing}
+                      className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:opacity-50"
+                    >
+                      <BarChart3 className="h-4 w-4 mr-2" />
+                      {isAnalyzing ? 'Analyzing...' : 'Ask Anton to visualize'}
+                    </button>
+                    <button
+                      onClick={() => setShowChat(!showChat)}
+                      className="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                    >
+                      <MessageSquare className="h-4 w-4 mr-2" />
+                      {showChat ? 'Hide Anton Chat' : 'Chat with Anton'}
+                    </button>
+                  </>
                 )}
               </div>
             </div>
@@ -485,6 +570,76 @@ export default function SharedDatasetPage() {
           </div>
         </div>
 
+        {dataset.enable_chat && (
+          <div className="bg-white shadow rounded-lg mb-6">
+            <div className="px-6 py-4 border-b border-gray-200">
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center">
+                  <BarChart3 className="h-5 w-5 text-purple-600 mr-2" />
+                  <div>
+                    <h2 className="text-lg font-medium text-gray-900">Ask Anton to analyze or visualize</h2>
+                    <p className="mt-1 text-sm text-gray-600">
+                      Use the MindsDB Anton chat flow to ask for summaries, patterns, and charts from this shared data.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => handleAntonAnalyze()}
+                  disabled={isAnalyzing}
+                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:opacity-50"
+                >
+                  {isAnalyzing ? 'Asking Anton...' : 'Ask Anton now'}
+                </button>
+              </div>
+            </div>
+            <div className="px-6 py-4 space-y-4">
+              <div className="flex flex-wrap gap-2">
+                {antonPrompts.map((prompt) => (
+                  <button
+                    key={prompt}
+                    onClick={() => handleAntonAnalyze(prompt)}
+                    disabled={isAnalyzing}
+                    className="px-3 py-2 text-sm rounded-md border border-purple-200 text-purple-700 bg-purple-50 hover:bg-purple-100 disabled:opacity-50"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+
+              {analysisError && (
+                <div className="bg-red-50 border border-red-200 rounded-md p-3">
+                  <p className="text-sm text-red-800">{analysisError}</p>
+                </div>
+              )}
+
+              {antonAnalysis && (
+                <div className="space-y-4">
+                  <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <span className="text-sm font-medium text-gray-900">
+                        {antonAnalysis.agent_name || 'Anton'} analysis
+                      </span>
+                      {antonAnalysis.visualization_count > 0 && (
+                        <span className="text-xs bg-purple-100 text-purple-800 px-2 py-1 rounded-full">
+                          {antonAnalysis.visualization_count} chart{antonAnalysis.visualization_count === 1 ? '' : 's'}
+                        </span>
+                      )}
+                    </div>
+                    <MarkdownRenderer content={antonAnalysis.answer || 'No analysis returned.'} />
+                  </div>
+
+                  {(antonAnalysis.has_visualizations || antonAnalysis.visualizations || antonAnalysis.data_analysis) && (
+                    <DataVisualization
+                      visualizations={antonAnalysis.visualizations}
+                      dataAnalysis={antonAnalysis.data_analysis}
+                    />
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* File Information - Show for uploaded files or datasets without proxy connection */}
         {(dataset.is_uploaded_file || !dataset.has_proxy_connection) && (
           <div className="bg-white shadow rounded-lg mb-6">
@@ -494,7 +649,7 @@ export default function SharedDatasetPage() {
                 <h2 className="text-lg font-medium text-gray-900">File Information</h2>
               </div>
               <p className="mt-1 text-sm text-gray-600">
-                This is a shared file that you can download and analyze
+                This is a shared file. You can ask Anton to analyze or visualize it, and download it if permitted.
               </p>
             </div>
             <div className="px-6 py-4">
@@ -574,11 +729,10 @@ export default function SharedDatasetPage() {
                     {dataset.preview_data?.type === 'multi_file' ? 'How to Access These Files' : 'How to Access This File'}
                   </h4>
                   <div className="text-sm text-green-700 space-y-1">
-                    <p>• Click the "Download" button above to get {dataset.preview_data?.type === 'multi_file' ? 'all files as a zip archive' : 'the file'}</p>
-                    <p>• Open {dataset.preview_data?.type === 'multi_file' ? 'the files' : 'the file'} in your preferred application (Excel, text editor, etc.)</p>
-                    {dataset.enable_chat && <p>• Use the Chat feature above to ask questions about the data</p>}
+                    {dataset.enable_chat && <p>• Ask Anton to summarize, analyze, or visualize this shared data directly in chat</p>}
+                    <p>• Download is optional and only needed if you want to inspect the raw {dataset.preview_data?.type === 'multi_file' ? 'files' : 'file'} locally</p>
                     {dataset.preview_data?.type === 'multi_file' && (
-                      <p className="text-green-600 italic">• Primary file ({dataset.preview_data.primary_file?.filename}) will be used for AI chat responses</p>
+                      <p className="text-green-600 italic">• Anton uses the dataset context and primary tabular file for chart generation when available</p>
                     )}
                   </div>
                 </div>
@@ -596,7 +750,7 @@ export default function SharedDatasetPage() {
                 <h2 className="text-lg font-medium text-gray-900">Third-Party Database Access</h2>
               </div>
               <p className="mt-1 text-sm text-gray-600">
-                Connect to this dataset using your preferred database client or BI tool
+                Ask Anton questions in chat, or connect through this secure proxy from a database client or BI tool
               </p>
             </div>
           <div className="px-6 py-4">
@@ -826,7 +980,7 @@ export default function SharedDatasetPage() {
               <div className="flex items-center justify-between">
                 <div className="flex items-center">
                   <MessageSquare className="h-5 w-5 text-blue-600 mr-2" />
-                  <h2 className="text-lg font-medium text-gray-900">AI Chat Assistant</h2>
+                  <h2 className="text-lg font-medium text-gray-900">Anton Data Analyst</h2>
                 </div>
                 {chatHistory.length > 0 && (
                   <button
@@ -838,7 +992,7 @@ export default function SharedDatasetPage() {
                 )}
               </div>
               <p className="mt-1 text-sm text-gray-600">
-                Ask questions about the shared dataset and get AI-powered insights
+                Ask Anton to analyze, visualize, build a dashboard outline, or answer follow-up questions about this shared dataset
               </p>
             </div>
             
@@ -898,7 +1052,7 @@ export default function SharedDatasetPage() {
                       <div className="bg-gray-100 text-gray-900 px-4 py-2 rounded-lg">
                         <div className="flex items-center space-x-2">
                           <div className="animate-spin rounded-full h-4 w-4 border-2 border-gray-300 border-t-blue-600"></div>
-                          <span className="text-sm">AI is thinking...</span>
+                          <span className="text-sm">Anton is thinking...</span>
                         </div>
                       </div>
                     </div>
@@ -918,7 +1072,7 @@ export default function SharedDatasetPage() {
                       value={chatMessage}
                       onChange={(e) => setChatMessage(e.target.value)}
                       onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleChat()}
-                      placeholder="What insights can you provide about this dataset?"
+                      placeholder="Ask Anton to summarize, visualize trends, or draft a dashboard..."
                       className="flex-1 border border-gray-300 rounded-lg px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                       disabled={isChatting}
                     />
@@ -934,8 +1088,7 @@ export default function SharedDatasetPage() {
                         </div>
                       ) : (
                         <>
-                          <span className="mr-1">🚀</span>
-                          Ask AI
+                          Ask Anton
                         </>
                       )}
                     </button>
@@ -945,21 +1098,13 @@ export default function SharedDatasetPage() {
                 {/* Suggestions */}
                 {chatHistory.length === 0 && (
                   <div className="bg-gradient-to-r from-blue-50 to-purple-50 border border-blue-200 rounded-lg p-4">
-                    <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center">
-                      <span className="text-xl mr-2">💡</span>
-                      Try these examples to get started:
+                    <h4 className="text-sm font-semibold text-gray-900 mb-3">
+                      Try these Anton prompts to get started:
                     </h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                      {[
-                        "📊 Show visualizations of this dataset",
-                        "📈 Analyze the data distribution with charts",
-                        "🔍 What are the key patterns and correlations?",
-                        "📉 Create statistical analysis with graphs",
-                        "💾 Summarize the dataset structure",
-                        "📋 Show me data quality issues"
-                      ].map((suggestion, index) => (
+                      {antonPrompts.map((suggestion) => (
                         <button
-                          key={index}
+                          key={suggestion}
                           onClick={() => setChatMessage(suggestion)}
                           className="text-left text-sm text-gray-700 hover:text-gray-900 p-3 rounded-lg hover:bg-white hover:shadow-sm transition-all border border-transparent hover:border-blue-200"
                         >
@@ -977,11 +1122,11 @@ export default function SharedDatasetPage() {
                       <span className="text-gray-500 text-lg">ℹ️</span>
                     </div>
                     <div className="ml-3">
-                      <h4 className="text-sm font-medium text-gray-800">Chat Information</h4>
+                      <h4 className="text-sm font-medium text-gray-800">Anton Information</h4>
                       <div className="mt-1 text-sm text-gray-600">
                         <p>
-                          This chat feature provides AI-powered analysis of the shared dataset. 
-                          Ask questions to get comprehensive insights, statistical analysis, and visualization recommendations.
+                          Anton uses MindsDB with dataset memory, semantic context, and canonical definitions when available.
+                          Ask for summaries, dashboards, charts, caveats, or follow-up analysis in the same chat.
                         </p>
                       </div>
                     </div>

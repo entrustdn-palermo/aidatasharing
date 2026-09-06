@@ -4,10 +4,9 @@ import { ProtectedRoute } from '@/components/auth/ProtectedRoute';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
-import { datasetsAPI, agentsAPI } from '@/lib/api';
+import { datasetsAPI } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { DataVisualization } from '@/components/DataVisualization';
 import { MarkdownRenderer } from '@/components/MarkdownRenderer';
@@ -33,14 +32,9 @@ function DatasetChatContent() {
   const [chatMessage, setChatMessage] = useState('');
   const [chatHistory, setChatHistory] = useState<any[]>([]);
   const [isChatting, setIsChatting] = useState(false);
-  const [availableAgents, setAvailableAgents] = useState<any[]>([]);
-  const [selectedAgent, setSelectedAgent] = useState<string>('auto');
-  const [useAgents, setUseAgents] = useState(true);
-  const [agentsLoading, setAgentsLoading] = useState(false);
 
   useEffect(() => {
     fetchDataset();
-    fetchAvailableAgents();
   }, [datasetId]);
 
   const fetchDataset = async () => {
@@ -57,26 +51,12 @@ function DatasetChatContent() {
     }
   };
 
-  const fetchAvailableAgents = async () => {
-    try {
-      setAgentsLoading(true);
-      const agents = await agentsAPI.getAvailableAgents();
-      setAvailableAgents(agents);
-    } catch (error: any) {
-      console.error('Failed to fetch available agents:', error);
-      // Don't show error for agents, just disable agent features
-      setUseAgents(false);
-    } finally {
-      setAgentsLoading(false);
-    }
-  };
-
   const handleChat = async () => {
     if (!chatMessage.trim()) return;
-    
+
     const userMessage = chatMessage.trim();
     setChatMessage('');
-    
+
     // Add user message to history
     const newUserMessage = {
       id: Date.now(),
@@ -85,22 +65,41 @@ function DatasetChatContent() {
       timestamp: new Date().toISOString()
     };
     setChatHistory(prev => [...prev, newUserMessage]);
-    
+
     try {
       setIsChatting(true);
 
-      // Determine agent to use
-      const agentName = selectedAgent === 'auto' ? undefined : selectedAgent;
+      // Always use MindsDB agent-based chat (no agent selection needed)
+      const response = await datasetsAPI.chatWithDataset(datasetId, userMessage, undefined, true);
 
-      const response = await datasetsAPI.chatWithDataset(datasetId, userMessage, agentName, useAgents);
+      // Parse MindsDB agent response if present
+      let answerText = response.answer || response.response || 'No response received';
+
+      // Handle AgentCompletion format from MindsDB
+      if (typeof answerText === 'string' && answerText.includes('AgentCompletion')) {
+        // Extract content from AgentCompletion(content: "...", ...)
+        const contentMatch = answerText.match(/content:\s*["`'](.+?)["`']/) ||
+                            answerText.match(/content:\s*(.+?)(?:,|\))/);
+        if (contentMatch) {
+          answerText = contentMatch[1].trim();
+        } else {
+          // Fallback: try to extract text between quotes
+          const simpleMatch = answerText.match(/["'](.+?)["']/);
+          if (simpleMatch) {
+            answerText = simpleMatch[1];
+          }
+        }
+      }
 
       // Add AI response to history
       const aiMessage = {
         id: Date.now() + 1,
         type: 'ai',
-        message: response.answer || response.response || 'No response received',
+        message: answerText,
         timestamp: new Date().toISOString(),
         model: response.model,
+        source: response.source, // Track if using agent or fallback
+        agent_name: response.agent_name, // Track agent name
         tokens_used: response.tokens_used,
         visualizations: response.visualizations || [], // New combined visualizations array
         plotly_figures: response.plotly_figures || [], // Plotly-specific figures
@@ -115,10 +114,10 @@ function DatasetChatContent() {
         error: false
       };
       setChatHistory(prev => [...prev, aiMessage]);
-      
+
     } catch (error: any) {
       console.error('Chat failed:', error);
-      
+
       // Add error message to history
       const errorMessage = {
         id: Date.now() + 1,
@@ -218,9 +217,16 @@ function DatasetChatContent() {
           <h1 className="text-2xl font-bold text-gray-900">
             Chat with "{dataset.name}"
           </h1>
-          <p className="mt-1 text-sm text-gray-600">
-            Ask questions about your dataset and get AI-powered insights using MindsDB
-          </p>
+          <div className="flex items-center gap-2 mt-2">
+            <p className="text-sm text-gray-600">
+              Ask questions about your dataset and get AI-powered insights using MindsDB Agents
+            </p>
+            {dataset.is_multi_file && (
+              <Badge variant="secondary" className="text-xs">
+                Multi-file ({dataset.total_files_count} files)
+              </Badge>
+            )}
+          </div>
         </div>
 
         {/* Chat Interface */}
@@ -229,11 +235,17 @@ function DatasetChatContent() {
             <div className="flex items-center justify-between">
               <div>
                 <CardTitle className="flex items-center">
-                  <span className="mr-2">💬</span>
-                  AI Chat Assistant
+                  <span className="mr-2">🤖</span>
+                  AI Agent Chat
                 </CardTitle>
                 <CardDescription>
-                  Powered by MindsDB and Google Gemini
+                  {dataset.agent_name ? (
+                    <span className="text-blue-600 font-medium">
+                      Using MindsDB Agent: {dataset.agent_name}
+                    </span>
+                  ) : (
+                    "Agent will be created on first chat"
+                  )}
                 </CardDescription>
               </div>
               {chatHistory.length > 0 && (
@@ -275,9 +287,22 @@ function DatasetChatContent() {
                               )}
                             </div>
 
-                            <p className="text-xs mt-3 pt-3 border-t border-gray-100 opacity-60">
-                              {new Date(message.timestamp).toLocaleTimeString()}
-                            </p>
+                            <div className="text-xs mt-3 pt-3 border-t border-gray-100 space-y-1">
+                              <p className="opacity-60">
+                                {new Date(message.timestamp).toLocaleTimeString()}
+                              </p>
+                              {message.agent_used && (
+                                <div className="flex items-center gap-2 text-blue-600">
+                                  <span>🤖</span>
+                                  <span>Agent: {message.agent_used}</span>
+                                </div>
+                              )}
+                              {message.model && (
+                                <p className="opacity-50">
+                                  Model: {message.model}
+                                </p>
+                              )}
+                            </div>
                           </div>
                         </div>
                         
@@ -353,16 +378,25 @@ function DatasetChatContent() {
                     Try these examples to get started:
                   </h4>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                    {[
-                      "📊 Show visualizations of this dataset",
-                      "📈 Analyze the data distribution with charts",
-                      "🔍 What are the key patterns and correlations?",
-                      "📉 Create statistical analysis with graphs",
-                      "💾 Summarize the dataset structure",
-                      "📋 Show me data quality issues",
-                      "🎯 What insights can you find?",
-                      "📊 Create a comprehensive data report"
-                    ].map((suggestion, index) => (
+                    {(dataset.is_multi_file ? [
+                      "📊 Visualize the relationships between files",
+                      "📈 Show me charts comparing data across files",
+                      "🔗 Create a visualization of the data patterns",
+                      "📉 Analyze and chart trends in the dataset",
+                      "🎯 Display graphs showing key insights",
+                      "📊 Generate visualizations for all tables",
+                      "💡 Show me data distributions with charts",
+                      "🔍 Create visual analysis of correlations"
+                    ] : [
+                      "📊 Create visualizations of this dataset",
+                      "📈 Show me charts of the data distribution",
+                      "🔍 Generate graphs showing patterns and trends",
+                      "📉 Visualize correlations and relationships",
+                      "💡 Display statistical charts and insights",
+                      "🎯 Create a visual analysis with graphs",
+                      "📊 Show me bar charts and scatter plots",
+                      "📈 Generate comprehensive data visualizations"
+                    ]).map((suggestion, index) => (
                       <button
                         key={index}
                         onClick={() => setChatMessage(suggestion)}
@@ -376,18 +410,33 @@ function DatasetChatContent() {
               )}
 
               {/* Information */}
-              <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+              <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-4">
                 <div className="flex">
                   <div className="flex-shrink-0">
-                    <span className="text-gray-500 text-lg">ℹ️</span>
+                    <span className="text-blue-500 text-lg">🤖</span>
                   </div>
                   <div className="ml-3">
-                    <h4 className="text-sm font-medium text-gray-800">About AI Chat</h4>
+                    <h4 className="text-sm font-medium text-gray-800">MindsDB Agent-Based Chat with Visualizations</h4>
                     <p className="mt-1 text-sm text-gray-600">
-                      Ask questions in natural language and get AI-powered insights with visualizations,
-                      statistical analysis, and data summaries. The AI will automatically create charts
-                      and graphs when helpful.
+                      Ask questions in natural language and get AI-powered insights using MindsDB agents.
+                      {dataset.is_multi_file && (
+                        <span className="font-medium text-blue-700">
+                          {' '}This multi-file dataset uses a single agent with access to all {dataset.total_files_count} files -
+                          you can ask questions that span across multiple files!
+                        </span>
+                      )}
+                      {' '}The agent can query your data using SQL, create visualizations, and provide detailed analysis.
                     </p>
+                    <div className="mt-2 space-y-1">
+                      <p className="text-xs text-green-700 bg-green-50 px-2 py-1 rounded inline-block mr-2">
+                        ✨ Request charts and visualizations by using keywords like "visualize", "chart", "graph", "plot"
+                      </p>
+                      {!dataset.agent_name && (
+                        <p className="text-xs text-blue-600 bg-blue-100 px-2 py-1 rounded inline-block">
+                          💡 The MindsDB agent will be created automatically when you send your first message
+                        </p>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>

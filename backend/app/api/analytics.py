@@ -369,29 +369,47 @@ def get_trends_data(db: Session, organization_id: int, start_date: datetime, end
     )
 
 def get_user_activity(db: Session, organization_id: int, start_date: datetime, end_date: datetime) -> List[UserActivityResponse]:
-    users = db.query(User).filter(User.organization_id == organization_id).all()
+    today = datetime.now().date()
+    last_activity_summary = db.query(
+        ActivityLog.user_id.label('user_id'),
+        func.max(ActivityLog.created_at).label('last_active')
+    ).filter(
+        ActivityLog.organization_id == organization_id,
+        ActivityLog.created_at.between(start_date, end_date)
+    ).group_by(ActivityLog.user_id).subquery()
 
-    activity_data = []
-    for user in users:
-        last_active = db.query(func.max(ActivityLog.timestamp)).filter(
-            ActivityLog.user_id == user.id,
-            ActivityLog.timestamp.between(start_date, end_date)
-        ).scalar()
+    today_activity_summary = db.query(
+        ActivityLog.user_id.label('user_id'),
+        func.count(ActivityLog.id).label('actions_today')
+    ).filter(
+        ActivityLog.organization_id == organization_id,
+        func.date(ActivityLog.created_at) == today
+    ).group_by(ActivityLog.user_id).subquery()
 
-        actions_today = db.query(func.count(ActivityLog.id)).filter(
-            ActivityLog.user_id == user.id,
-            func.date(ActivityLog.timestamp) == datetime.now().date()
-        ).scalar() or 0
+    rows = db.query(
+        User,
+        last_activity_summary.c.last_active,
+        today_activity_summary.c.actions_today
+    ).outerjoin(
+        last_activity_summary,
+        last_activity_summary.c.user_id == User.id
+    ).outerjoin(
+        today_activity_summary,
+        today_activity_summary.c.user_id == User.id
+    ).filter(
+        User.organization_id == organization_id
+    ).all()
 
-        activity_data.append(UserActivityResponse(
+    return [
+        UserActivityResponse(
             user_id=user.id,
             name=user.full_name or user.email.split('@')[0],
             last_active=last_active.isoformat() if last_active else None,
-            actions_today=actions_today,
+            actions_today=actions_today or 0,
             role=user.role or 'User',
-            department=user.department or 'General'
-        ))
-    return activity_data
+            department='General'
+        ) for user, last_active, actions_today in rows
+    ]
 
 def get_data_usage_stats(db: Session, organization_id: int) -> DataUsageResponse:
     """Get data usage statistics for the organization"""
@@ -399,9 +417,12 @@ def get_data_usage_stats(db: Session, organization_id: int) -> DataUsageResponse
     # Most accessed datasets
     most_accessed_query = db.query(
         Dataset,
-        func.count(DatasetAccess.id).label('access_count')
+        func.count(DatasetAccess.id).label('access_count'),
+        func.max(DatasetAccess.timestamp).label('last_accessed')
     ).outerjoin(DatasetAccess).filter(
-        Dataset.organization_id == organization_id
+        Dataset.organization_id == organization_id,
+        Dataset.is_deleted == False,
+        Dataset.is_active == True
     ).group_by(Dataset.id).order_by(desc('access_count')).limit(5).all()
 
     most_accessed = [
@@ -409,25 +430,25 @@ def get_data_usage_stats(db: Session, organization_id: int) -> DataUsageResponse
             id=dataset.id,
             name=dataset.name,
             access_count=access_count,
-            last_accessed=db.query(func.max(DatasetAccess.timestamp)).filter(DatasetAccess.dataset_id == dataset.id).scalar().isoformat() if access_count > 0 else None,
+            last_accessed=last_accessed.isoformat() if last_accessed else None,
             sharing_level=dataset.sharing_level
-        ) for dataset, access_count in most_accessed_query
+        ) for dataset, access_count, last_accessed in most_accessed_query
     ]
 
     # Storage by department
-    storage_by_dept_query = db.query(
-        User.department,
-        func.sum(Dataset.size_bytes)
-    ).join(Dataset, Dataset.owner_id == User.id).filter(
-        User.organization_id == organization_id
-    ).group_by(User.department).all()
+    total_dataset_storage = db.query(func.sum(Dataset.size_bytes)).filter(
+        Dataset.organization_id == organization_id,
+        Dataset.is_deleted == False,
+        Dataset.is_active == True
+    ).scalar() or 0
+    storage_by_dept_query = [('General', total_dataset_storage)]
 
-    total_storage = sum(size for _, size in storage_by_dept_query) or 1
+    total_storage = sum(size or 0 for _, size in storage_by_dept_query) or 1
     storage_by_dept = [
         StorageByDepartmentResponse(
             department=dept or 'Unassigned',
-            storage=size / (1024**3),
-            percentage=(size / total_storage * 100)
+            storage=(size or 0) / (1024**3),
+            percentage=((size or 0) / total_storage * 100)
         ) for dept, size in storage_by_dept_query
     ]
 

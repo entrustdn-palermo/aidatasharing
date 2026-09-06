@@ -143,6 +143,10 @@ async def create_llm_configuration(
             LLMConfiguration.is_default == True
         ).update({"is_default": False})
     
+    # Encrypt API key before storing
+    from app.core.encryption import encrypt
+    encrypted_api_key = encrypt(config_data.api_key) if config_data.api_key else None
+
     # Create configuration
     db_config = LLMConfiguration(
         name=config_data.name,
@@ -150,7 +154,7 @@ async def create_llm_configuration(
         llm_model_name=config_data.model_name,
         description=config_data.description,
         organization_id=current_user.organization_id,
-        api_key=config_data.api_key,  # TODO: Encrypt in production
+        api_key=encrypted_api_key,  # ✅ Now encrypted
         api_base=config_data.api_base,
         model_params=config_data.model_params,
         litellm_config=config_data.litellm_config,

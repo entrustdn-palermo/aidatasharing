@@ -389,14 +389,17 @@ async def admin_delete_dataset(
                 detail="Dataset is already deleted. Use force_delete=true to permanently delete."
             )
         
-        # Clean up associated ML models first
+        # Clean up associated MindsDB agent first
         try:
+            from app.services.agent_gateway import AgentGateway
             from app.services.mindsdb import MindsDBService
-            mindsdb_service = MindsDBService()
-            ml_cleanup_result = mindsdb_service.delete_dataset_models(dataset_id)
-            logger.info(f"ML models cleanup result: {ml_cleanup_result}")
+            mindsdb_service: AgentGateway = MindsDBService()
+            if dataset.agent_name:
+                agent_name = dataset.agent_name
+                if mindsdb_service.delete_dataset_agent(dataset, db):
+                    logger.info(f"Agent {agent_name} deleted")
         except Exception as e:
-            logger.warning(f"ML models cleanup failed: {e}")
+            logger.warning(f"Agent cleanup failed: {e}")
         
         if force_delete:
             # Hard delete (permanent removal) - need to clean up related records first
@@ -1167,6 +1170,18 @@ async def update_environment_variable(
                 raise HTTPException(status_code=400, detail=f"Failed to update: {', '.join(result.errors)}")
         else:
             # Direct environment variable update (not managed)
+            # SECURITY: Only allow safe environment variables
+            ALLOWED_ENV_VARS = {
+                "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+                "DEFAULT_GEMINI_MODEL", "LOG_LEVEL", "MAX_UPLOAD_SIZE_MB",
+                "MAX_CHAT_SESSIONS_PER_DATASET", "DEFAULT_DOWNLOAD_EXPIRY_HOURS",
+                "STORAGE_BACKEND", "S3_BUCKET", "S3_REGION", "S3_ENDPOINT_URL",
+            }
+            if key not in ALLOWED_ENV_VARS:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Environment variable '{key}' is not in the allowed set for direct update"
+                )
             os.environ[key] = value
             return {"message": f"Environment variable '{key}' updated successfully"}
             
@@ -1695,8 +1710,9 @@ async def _get_system_health_status(db: Session) -> Dict[str, Any]:
         # Check MindsDB connection
         mindsdb_status = {"connected": False, "error": None}
         try:
+            from app.services.agent_gateway import AgentGateway
             from app.services.mindsdb import MindsDBService
-            mindsdb_service = MindsDBService()
+            mindsdb_service: AgentGateway = MindsDBService()
             health_check = mindsdb_service.health_check()
             mindsdb_status = {
                 "connected": health_check.get("status") == "healthy",
@@ -2466,7 +2482,17 @@ async def cleanup_orphaned_datasets(
             }
         
         dataset_ids = [d.id for d in orphaned_datasets]
-        
+
+        try:
+            from app.services.agent_gateway import AgentGateway
+            from app.services.mindsdb import MindsDBService
+            mindsdb_service: AgentGateway = MindsDBService()
+            for dataset in orphaned_datasets:
+                if dataset.agent_name:
+                    mindsdb_service.delete_agent(dataset.agent_name)
+        except Exception as e:
+            logger.warning(f"Agent cleanup failed for orphaned datasets: {e}")
+
         # Import related models
         from app.models.dataset import (
             DatasetAccessLog, DatasetDownload, DatasetModel, 

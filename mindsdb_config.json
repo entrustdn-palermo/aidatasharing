@@ -10,6 +10,14 @@
     }
   },
   "integrations": {},
+  "permanent_storage": {
+    "location": "s3",
+    "bucket": "entrust-storage",
+    "s3_credentials": {
+      "endpoint_url": "https://g7h4.fra3.idrivee2-51.com",
+      "region_name": "us-east-1"
+    }
+  },
   "storage_dir": "/Users/syaikhipin/Documents/program/simpleaisharing/storage",
   "log": {
     "level": "WARNING"

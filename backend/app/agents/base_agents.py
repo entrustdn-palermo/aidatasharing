@@ -4,10 +4,6 @@ Inspired by Auto-Analyst's agentic approach.
 """
 
 import dspy
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
 from typing import Dict, Any, List, Optional
 import json
 import logging

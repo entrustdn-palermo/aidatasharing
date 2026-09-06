@@ -167,7 +167,7 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
           <div className="flex-1 px-4 flex justify-between">
             <div className="flex-1 flex items-center">
               <h1 className="text-lg font-semibold text-gray-900">
-                AI Share Platform
+                Entrust MCP Platform
               </h1>
               {organization && (
                 <span className="ml-3 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">

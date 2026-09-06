@@ -2,8 +2,6 @@
 Configuration Validator for AI Share Platform
 """
 
-import os
-import sys
 import logging
 
 logger = logging.getLogger(__name__)

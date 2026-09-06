@@ -1,5 +1,6 @@
 # Database models - Import all models to ensure they are registered with SQLAlchemy
 
+from app.core.database import Base
 from .user import User
 from .organization import Organization, OrganizationType, DataSharingLevel, UserRole
 from .config import Configuration
@@ -22,8 +23,13 @@ from .proxy_connector import (
 from .admin_config import (
     ConfigurationOverride, MindsDBConfiguration, ConfigurationHistory
 )
+from .agri import Region, Crop
+from .data_connector import DataConnector
 
 __all__ = [
+    # SQLAlchemy base
+    "Base",
+
     # User models
     "User",
     
@@ -52,5 +58,11 @@ __all__ = [
     "ProxyConnector", "SharedProxyLink", "ProxyAccessLog", "ProxyCredentialVault",
     
     # Admin config models
-    "ConfigurationOverride", "MindsDBConfiguration", "ConfigurationHistory"
+    "ConfigurationOverride", "MindsDBConfiguration", "ConfigurationHistory",
+
+    # Agricultural reference models
+    "Region", "Crop",
+
+    # Compatibility alias
+    "DataConnector",
 ]

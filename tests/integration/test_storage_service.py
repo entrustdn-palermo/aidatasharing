@@ -20,6 +20,7 @@ os.environ['STORAGE_TYPE'] = 'local'
 os.environ['STORAGE_DIR'] = tempfile.mkdtemp()
 
 from app.services.storage import StorageService, LocalStorageBackend, S3StorageBackend
+from app.services.download_token import download_token_service
 
 class TestStorageService:
     """Test storage service functionality"""
@@ -183,17 +184,17 @@ class TestStorageService:
             dataset_id = 123
             user_id = 456
             
-            token = self.storage_service.generate_download_token(dataset_id, user_id)
+            token = download_token_service.generate(dataset_id, user_id)
             print(f"✓ Download token generated: {token[:20]}...")
             
             # Test token validation
-            is_valid = self.storage_service.validate_download_token(token)
+            is_valid = download_token_service.validate(token)
             if is_valid:
                 print("✓ Token validation passed")
             else:
                 print("✗ Token validation failed")
                 return False
-            
+
             # Test invalid token validation
             invalid_tokens = [
                 "",
@@ -202,9 +203,9 @@ class TestStorageService:
                 "invalid_format_with_no_underscore",
                 "valid_length_but_wrong_format_12345678901234567890123456789012"
             ]
-            
+
             for invalid_token in invalid_tokens:
-                is_valid = self.storage_service.validate_download_token(invalid_token)
+                is_valid = download_token_service.validate(invalid_token)
                 if not is_valid:
                     print(f"✓ Invalid token correctly rejected: {invalid_token[:20]}...")
                 else:

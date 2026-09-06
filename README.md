@@ -1,16 +1,61 @@
-# AI Share Platform
+# 🌱 Entrust Data Sharing MCP Platform
 
-A comprehensive AI-powered data sharing platform that enables organizations to securely share, analyze, and build machine learning models on their data.
+<div align="center">
+
+**Agent-Based Data Sharing Protocol for Agricultural Sustainability Analysis**
+
+*AI-Powered Multi-File Correlation with Persistent Context*
+
+[![EU Horizon](https://img.shields.io/badge/EU%20Horizon-ENTRUST%20DN-blue?style=for-the-badge&logo=european-union)](https://entrustdn.eu)
+[![License](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python)](https://www.python.org)
+[![Next.js](https://img.shields.io/badge/Next.js-15-black?style=for-the-badge&logo=next.js)](https://nextjs.org)
+[![MindsDB](https://img.shields.io/badge/MindsDB-Agents-purple?style=for-the-badge)](https://mindsdb.com)
+
+*Developed as part of the EU Horizon ENTRUST Doctoral Network*
+
+*Università degli Studi di Palermo (UNIPA) | ELMI Software | Airfield Estate Dublin*
+
+[🚀 Quick Start](#-quick-start) • [✨ Features](#-key-features) • [📖 Documentation](#-documentation) • [🤝 Contributing](#-contributing)
+
+</div>
+
+---
+
+## 🎯 Project Overview
+
+This platform was developed as part of the **EU Horizon ENTRUST Doctoral Network** (Marie Skłodowska-Curie Grant Agreement No 101073381) to address fundamental challenges in agricultural data analysis.
+
+**Doctoral Candidate 01** | *This project has received funding from the European Union's Horizon 2021 research and innovation programme under the Marie Skłodowska-Curie grant agreement No 101073381*
+
+Traditional AI systems analyze data files in isolation, leading to significant data underutilization. This platform introduces a **persistent agent-based architecture** that enables intelligent multi-file correlation and contextual analysis.
+
+### 🏛️ Academic Context
+
+- **Institution**: Università degli Studi di Palermo (UNIPA)
+- **Academic Supervisors**: Biagio Lenzitti, Domenico Tegolo (UNIPA)
+- **First Secondment**: ELMI Software, Palermo (Supervisors: Camillo Gioè, Vito Puleio)
+- **Second Secondment**: Airfield Estate, Dublin, Ireland (September - November 2025)
+- **Doctoral Candidate 01**: Nur Arifin Akbar
+
+---
 
 ## 🚀 Quick Start
 
-### Fresh Installation
+### Prerequisites
+- **Python 3.10+**
+- **Node.js 18+**
+- **MindsDB** (local or cloud instance)
+- **Git**
+
+### Installation
+
 ```bash
 # Clone the repository
-git clone <repository-url>
-cd simpleaisharing
+git clone https://github.com/entrustdn-palermo/aidatasharing.git
+cd aidatasharing
 
-# Run fresh installation setup
+# Run installation setup
 python setup_fresh_install.py
 
 # Start development environment
@@ -22,248 +67,324 @@ python setup_fresh_install.py
 - **Backend API**: http://localhost:8000
 - **API Documentation**: http://localhost:8000/docs
 
-### Default Admin Credentials
+### Default Credentials
 - **Email**: admin@example.com
-- **Password**: admin123
+- **Password**: SuperAdmin123!
+
+---
 
 ## ✨ Key Features
 
-### 📊 Dataset Management
-- **Multiple Formats**: CSV, JSON, Excel, PDF, DOCX, DOC, TXT, RTF, ODT
-- **Document Processing**: Automatic text extraction and analysis
-- **Schema Detection**: Automatic data structure analysis
-- **Preview Generation**: Smart data previews and summaries
+### 🧠 Agent-Based Architecture
 
-### 🔗 Data Connectors
-- **Databases**: MySQL, PostgreSQL, MongoDB, Snowflake, BigQuery, Redshift, ClickHouse
-- **Cloud Storage**: AWS S3 integration
-- **API Sources**: REST API data connectors
-- **File Systems**: Local and network file system access
+**Persistent Context Memory**
+- AI agents maintain understanding of data structure across sessions
+- No need to re-explain data format with every query
+- Accumulated domain-specific knowledge and patterns
 
-### 🤖 AI Integration
-- **MindsDB**: Advanced ML model creation and management
-- **Google Gemini**: Natural language processing and chat
-- **Document Chat**: AI-powered document Q&A
-- **Data Insights**: Automated analysis and recommendations
+**Multi-File Correlation**
+- Analyze multiple related datasets simultaneously
+- Cross-reference data across different sources
+- Correlate information for comprehensive insights
 
-### 🔐 Security & Sharing
-- **Organization Scoping**: Multi-tenant data isolation
-- **Secure Sharing**: Password-protected, expiring share links
-- **Role-Based Access**: Granular permission management
-- **Audit Logging**: Comprehensive activity tracking
+**Adaptive Learning**
+- Learns specific patterns of your data
+- Contextual interpretation based on domain
+- Handles real-world data characteristics (incomplete records, variations, seasonality)
 
-### 📈 Analytics & Monitoring
-- **Usage Analytics**: Real-time usage monitoring
-- **Performance Metrics**: System performance tracking
-- **Data Quality**: Automated data quality assessment
-- **User Activity**: Detailed user activity logs
+**Performance Improvements**
+- 60-75% faster response times through persistent context
+- Optimized API usage (60% fewer calls)
+- Non-blocking asynchronous processing
 
-### ⚙️ Environment Management
-- **Unified Configuration**: Single .env file managed from admin panel
-- **Category-based Settings**: Organized environment variables
-- **Real-time Updates**: Update configuration without restart
-- **Security**: Masked sensitive values
+### 📊 Data Management
+
+**Supported Formats**: CSV, XLSX, JSON, TXT, PDF, Parquet
+
+**Key Capabilities**:
+- Secure file upload and storage (S3-compatible)
+- Automatic schema detection
+- Multi-file dataset support
+- PDF document analysis and extraction
+- Data preview and exploration
+
+### 🔐 Security & Collaboration
+
+- JWT-based authentication
+- Organization-scoped data isolation
+- Secure sharing with time-limited tokens
+- Comprehensive audit logging
+- Role-based access control
+
+---
 
 ## 🏗️ Architecture
 
-### Backend (FastAPI)
-- **FastAPI**: Modern, fast web framework
-- **SQLAlchemy**: Advanced ORM with SQLite support
-- **Pydantic**: Data validation and serialization
-- **JWT Authentication**: Secure token-based authentication
-- **Background Tasks**: Async processing for large operations
+### Technology Stack
 
-### Frontend (Next.js)
-- **Next.js 15**: React framework with App Router
-- **TypeScript**: Type-safe development
-- **Tailwind CSS**: Utility-first styling
-- **Responsive Design**: Mobile-friendly interface
-- **Real-time Updates**: Live data synchronization
+**Backend**
+- FastAPI (Modern async Python framework)
+- SQLAlchemy ORM
+- MindsDB SDK 3.4.8+
+- AWS S3 / boto3 integration
+- PostgreSQL / SQLite database
 
-### Database
-- **Unified Database**: Single SQLite database for all data
-- **Future Flexibility**: Easily switchable to PostgreSQL or other databases
-- **Migration System**: Automated schema updates
-- **Data Isolation**: Organization-scoped data security
+**Frontend**
+- Next.js 15 with App Router
+- React 18 with TypeScript
+- Tailwind CSS
+- Real-time updates
 
-## 📁 Project Structure
+**AI Layer**
+- MindsDB Agents (persistent context)
+- GPT-4 via OpenAI
+- Custom domain-specific prompts
+
+### Agent-Based Processing Pipeline
 
 ```
-simpleaisharing/
-├── backend/                 # FastAPI backend application
-│   ├── app/                # Application code
-│   │   ├── api/           # API endpoints
-│   │   ├── core/          # Core functionality
+User Upload → S3 Storage → Asynchronous Processing → MindsDB Agent Creation
+                                                              ↓
+User Query ← Intelligent Response ← Agent Analysis ← Persistent Context
+```
+
+---
+
+## 📖 Documentation
+
+### Complete Technical Report
+
+A comprehensive technical report documents the implementation, testing, and validation:
+
+**[📄 Read the Full Technical Report](report/COMPREHENSIVE_SECONDMENT_REPORT.md)**
+
+**Report Contents**:
+- Problem context and architectural necessity
+- Design and implementation details
+- Real-world testing and validation
+- Technical insights and best practices
+- Performance metrics and evidence
+
+### Project Structure
+
+```
+aidatasharing/
+├── backend/                # FastAPI backend
+│   ├── app/
+│   │   ├── api/           # REST API endpoints
+│   │   ├── services/      # Business logic
 │   │   ├── models/        # Database models
-│   │   ├── schemas/       # Pydantic schemas
-│   │   └── services/      # Business logic
-│   └── requirements.txt   # Python dependencies
-├── frontend/               # Next.js frontend application
-│   ├── src/               # Source code
-│   │   ├── app/          # Next.js pages
+│   │   └── core/          # Configuration
+│   └── tests/             # Test suite
+│
+├── frontend/              # Next.js frontend
+│   ├── src/
+│   │   ├── app/          # Pages
 │   │   ├── components/   # React components
 │   │   └── lib/          # Utilities
-│   └── package.json      # Node.js dependencies
+│   └── package.json
+│
+├── report/                # Technical documentation
 ├── storage/               # Data storage
-│   ├── aishare_platform.db # Unified SQLite database
-│   ├── uploads/          # File uploads
-│   └── documents/        # Document processing
-├── migrations/           # Database migrations
-├── .env                 # Unified environment configuration
-└── README.md           # This file
+├── .env                   # Configuration
+└── README.md
 ```
 
-## 🛠️ Development
-
-### Prerequisites
-- **Python 3.12+** (recommended: conda environment)
-- **Node.js 18+**
-- **Git**
-
-### Setup Development Environment
-```bash
-# Create conda environment (recommended)
-conda create -n aishare-platform python=3.9
-conda activate aishare-platform
-
-# Run fresh installation
-python setup_fresh_install.py
-
-# Start development servers
-./start-dev.sh
-```
-
-### Development Commands
-```bash
-# Start development environment
-./start-dev.sh
-
-# Stop development environment
-./stop-dev.sh
-
-# Backend only
-cd backend && python start.py
-
-# Frontend only
-cd frontend && npm run dev
-```
-
-### Environment Configuration
-
-The platform uses a unified `.env` file for all configuration. You can manage environment variables through:
-
-1. **Admin Panel**: Use the Environment Settings in the admin panel (recommended)
-2. **Direct Edit**: Edit the `.env` file directly
-
-Key configuration categories:
-- **Database**: SQLite database configuration
-- **Security**: JWT and authentication settings
-- **API**: Google AI and external API keys
-- **AI Models**: Gemini and MindsDB configuration
-- **Data Sharing**: Sharing and collaboration settings
-- **File Upload**: Upload limits and file types
-- **Connectors**: Data connector settings
-- **AWS**: S3 and cloud service configuration
+---
 
 ## 🔧 Configuration
 
 ### Environment Variables
-All environment variables are managed through the unified `.env` file and can be configured via the admin panel:
 
-- **DATABASE_URL**: SQLite database path (unified storage)
-- **GOOGLE_API_KEY**: Google AI API key for Gemini integration
-- **MINDSDB_URL**: MindsDB server URL
-- **SECRET_KEY**: JWT signing secret
-- **MAX_FILE_SIZE_MB**: Maximum file upload size
-- **ALLOWED_FILE_TYPES**: Supported file formats
+Configure via `.env` file or admin panel:
 
-### Admin Panel Management
-Access environment settings through:
-1. Login as admin (admin@example.com / admin123)
-2. Go to Admin Panel
-3. Click "Environment Settings"
-4. Edit variables by category
-5. Changes take effect immediately
-
-## 🚀 Deployment
-
-### Development Deployment
 ```bash
-# Start with development configuration
-./start-dev.sh
+# Database
+DATABASE_URL=postgresql://user:pass@localhost:5432/entrust_db
+
+# MindsDB (Required)
+MINDSDB_BASE_URL=http://localhost:47334
+MINDSDB_AGENT_MODEL=gpt-4
+USE_AGENT_BASED_CHAT=True
+
+# File Processing
+ALLOWED_FILE_TYPES=csv,xlsx,xls,json,txt,pdf,parquet
+MAX_FILE_SIZE_MB=50
+
+# S3 Storage
+AWS_ACCESS_KEY_ID=your_key
+AWS_SECRET_ACCESS_KEY=your_secret
+S3_BUCKET=entrust-datasets
+
+# API Keys
+OPENAI_API_KEY=your_openai_key
+SECRET_KEY=your-secret-key
 ```
-
-### Production Deployment
-1. Update `.env` with production configuration via admin panel
-2. Set `NODE_ENV=production`
-3. Configure external database if needed (PostgreSQL)
-4. Set up cloud storage (S3) if required
-5. Configure reverse proxy (nginx)
-6. Set up SSL certificates
-
-### Docker Deployment (Coming Soon)
-```bash
-# Build and run with Docker
-docker-compose up -d
-```
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-### Development Guidelines
-- Follow PEP 8 for Python code
-- Use TypeScript for frontend development
-- Write tests for new features
-- Update documentation for changes
-- Follow conventional commit messages
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🆘 Support
-
-### Getting Help
-- **Issues**: Create an issue on GitHub
-- **Discussions**: Use GitHub Discussions for questions
-
-### Common Issues
-- **Database Connection**: Ensure SQLite file permissions are correct
-- **Port Conflicts**: Check if ports 3000/8000 are available
-- **Dependencies**: Run `pip install -r backend/requirements.txt`
-- **Environment**: Use admin panel to configure environment variables
-
-## 🎯 Roadmap
-
-### Current Version (v1.0)
-- ✅ Core dataset management
-- ✅ Document processing
-- ✅ Data connectors
-- ✅ AI chat integration
-- ✅ Secure sharing
-- ✅ Unified environment management
-
-### Upcoming Features (v1.1)
-- 🔄 Advanced document analysis (OCR, table extraction)
-- 🔄 More database connectors (Oracle, SQL Server)
-- 🔄 Enhanced AI models and analysis
-- 🔄 Real-time collaboration features
-- 🔄 Advanced analytics dashboard
-
-### Future Plans (v2.0)
-- 🔮 Machine learning pipeline automation
-- 🔮 Advanced data visualization
-- 🔮 API marketplace
-- 🔮 Enterprise SSO integration
-- 🔮 Multi-cloud deployment
 
 ---
 
-**AI Share Platform** - Empowering organizations with intelligent data sharing and AI-driven insights.
+## 🧑‍💻 Development
 
-*Built with ❤️ using FastAPI, Next.js, SQLite, and modern AI technologies.*
+### Setup Development Environment
+
+```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+cd backend && pip install -r requirements.txt
+cd ../frontend && npm install
+
+# Start development servers
+cd .. && ./start-dev.sh
+```
+
+### Development Commands
+
+```bash
+# Start full stack
+./start-dev.sh
+
+# Backend only
+cd backend && uvicorn app.main:app --reload
+
+# Frontend only
+cd frontend && npm run dev
+
+# Run tests
+cd backend && pytest
+```
+
+---
+
+## 🚀 Deployment
+
+### Production Checklist
+
+- [ ] Configure production environment variables
+- [ ] Set up PostgreSQL database
+- [ ] Configure S3 bucket with proper permissions
+- [ ] Set up MindsDB production instance
+- [ ] Configure reverse proxy (nginx/Caddy)
+- [ ] Install SSL certificates
+- [ ] Enable monitoring and logging
+
+### Docker Deployment
+
+```bash
+# Build and start services
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+```
+
+---
+
+## 🤝 Contributing
+
+We welcome contributions from the research community!
+
+### How to Contribute
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/new-feature`)
+3. Commit your changes (`git commit -m 'feat: add new feature'`)
+4. Push to the branch (`git push origin feature/new-feature`)
+5. Open a Pull Request
+
+### Guidelines
+
+- Follow PEP 8 for Python code
+- Use TypeScript for frontend development
+- Write tests for new features
+- Update documentation
+- Follow conventional commit messages
+
+---
+
+## 📄 License
+
+This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+
+```
+MIT License
+
+Copyright (c) 2025 EU Horizon ENTRUST Doctoral Network
+Marie Skłodowska-Curie Grant Agreement No 101073381
+Università degli Studi di Palermo (UNIPA) | ELMI Software Palermo
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software...
+```
+
+---
+
+## 🙏 Acknowledgments
+
+### 🇪🇺 EU Horizon ENTRUST Doctoral Network
+- **Grant Agreement**: Marie Skłodowska-Curie No 101073381
+- **Funding**: European Union's Horizon 2021 Research and Innovation Programme
+- **Network**: Training experts in trustworthy AI for environmental sustainability
+- **Position**: Doctoral Candidate 01
+
+### 🏛️ Academic Supervision
+- **Biagio Lenzitti** (UNIPA) - Academic supervision and guidance
+- **Domenico Tegolo** (UNIPA) - Academic support
+
+### 🏢 First Secondment - ELMI Software, Palermo
+- **Camillo Gioè** - Secondment supervision
+- **Vito Puleio** - Secondment support
+
+### 🌾 Second Secondment - Airfield Estate, Dublin
+- **Paul O'Keeffe** - Facilitation and support
+- **Airfield Estate Team** - Collaboration and data access
+
+### 💻 Open Source Community
+- **MindsDB** - Agent-based AI framework
+- **FastAPI** - Python web framework
+- **Next.js** - React framework
+
+---
+
+## 📞 Contact & Support
+
+### Getting Help
+
+- 📧 **Email**: nurarifin.akbar@unipa.it
+- 🐛 **Issues**: [GitHub Issues](https://github.com/entrustdn-palermo/aidatasharing/issues)
+- 💬 **Discussions**: [GitHub Discussions](https://github.com/entrustdn-palermo/aidatasharing/discussions)
+- 📚 **Documentation**: [Technical Report](report/COMPREHENSIVE_SECONDMENT_REPORT.md)
+- 🌐 **Website**: [ENTRUST DN](https://entrustdn.eu)
+
+### Research Collaboration
+
+Interested in collaborating on agricultural AI research or agent-based data analysis? Contact us through UNIPA or the ENTRUST DN network.
+
+---
+
+<div align="center">
+
+## ⭐ Star This Repository!
+
+**If you find this project valuable, please star it on GitHub!**
+
+Your support helps:
+- 🎓 Increase visibility for agricultural AI research
+- 🌍 Support the EU Horizon ENTRUST DN mission
+- 🤝 Encourage open-source collaboration
+- 📊 Demonstrate research impact
+
+---
+
+**Built with ❤️ for sustainable agriculture and trustworthy AI**
+
+*EU Horizon ENTRUST Doctoral Network | UNIPA | ELMI Software | Airfield Estate*
+
+[⬆ Back to Top](#-entrust-data-sharing-mcp-platform)
+
+</div>

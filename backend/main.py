@@ -14,7 +14,7 @@ except ImportError:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import auth, organizations, datasets, models, mindsdb, admin, analytics, data_access, data_sharing, data_sharing_files, file_handler, file_server, data_connectors, llm_configurations, environment, proxy_connectors, gateway, storage_management, unified_router, integrated_proxy, agents
+from app.api import auth, organizations, datasets, models, mindsdb, admin, analytics, data_access, data_sharing, data_sharing_files, file_handler, file_server, data_connectors, llm_configurations, environment, proxy_connectors, gateway, storage_management, unified_router, agents, agri
 from app.core.config import settings
 from app.middleware import SSLMiddleware, FlexibleSSLConfig
 from app.core.config_validator import validate_and_exit_on_failure
@@ -311,8 +311,8 @@ app.include_router(data_connectors.router, prefix="/api/connectors", tags=["data
 app.include_router(environment.router, prefix="/api/admin/environment", tags=["admin"])
 app.include_router(llm_configurations.router, prefix="/api/llm-configs", tags=["llm-configurations"])
 app.include_router(proxy_connectors.router, prefix="/api/proxy-connectors", tags=["proxy-connectors"])
-app.include_router(integrated_proxy.router, prefix="/api/proxy", tags=["integrated-proxy"])
 app.include_router(gateway.router, prefix="/api/gateway", tags=["gateway"])
+app.include_router(agri.router, prefix="/api/agri", tags=["agri-reference-data"])
 app.include_router(storage_management.router, prefix="/api/admin/storage", tags=["admin"])
 
 # Include the unified router for single-port architecture

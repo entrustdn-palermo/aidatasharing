@@ -10,7 +10,7 @@ const apiClient = axios.create({
   },
 });
 
-// Add request interceptor to include auth token
+// Add request interceptor to include auth token and handle trailing slashes
 apiClient.interceptors.request.use(
   (config) => {
     // Check for both token names for backward compatibility
@@ -18,6 +18,12 @@ apiClient.interceptors.request.use(
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
+
+    // Add trailing slash to avoid 307 redirects (FastAPI requirement)
+    if (config.url && !config.url.endsWith('/') && !config.url.includes('?')) {
+      config.url = config.url + '/';
+    }
+
     return config;
   },
   (error) => {
@@ -42,10 +48,11 @@ apiClient.interceptors.response.use(
 // Auth API
 export const authAPI = {
   login: async (email: string, password: string) => {
-    const formData = new FormData();
+    // Use URLSearchParams for proper application/x-www-form-urlencoded encoding
+    const formData = new URLSearchParams();
     formData.append('username', email);
     formData.append('password', password);
-    
+
     const response = await apiClient.post('/api/auth/login', formData, {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -73,40 +80,15 @@ export const authAPI = {
 };
 
 // Admin API
-export const adminAPI = {
-  getConfigurations: async () => {
-    const response = await apiClient.get('/api/admin/config');
-    return response.data;
-  },
-  
-  createConfiguration: async (config: { key: string; value?: string; description?: string }) => {
-    const response = await apiClient.post('/api/admin/config', config);
-    return response.data;
-  },
-  
-  updateConfiguration: async (key: string, config: { value?: string; description?: string }) => {
+export const adminAPI = {updateConfiguration: async (key: string, config: { value?: string; description?: string }) => {
     const response = await apiClient.put(`/api/admin/config/${key}`, config);
     return response.data;
-  },
-  
-  deleteConfiguration: async (key: string) => {
-    const response = await apiClient.delete(`/api/admin/config/${key}`);
-    return response.data;
-  },
-  
-  setGoogleApiKey: async (apiKey: string) => {
+  },setGoogleApiKey: async (apiKey: string) => {
     const response = await apiClient.post('/api/admin/google-api-key', {
       api_key: apiKey,
     });
     return response.data;
-  },
-  
-  getGoogleApiKeyStatus: async () => {
-    const response = await apiClient.get('/api/admin/google-api-key');
-    return response.data;
-  },
-
-  // Admin dataset management
+  },// Admin dataset management
   getAdminDatasets: async (params?: {
     skip?: number;
     limit?: number;
@@ -151,24 +133,10 @@ export const adminAPI = {
   updateEnvironmentVariable: async (name: string, value: string) => {
     const response = await apiClient.put(`/api/admin/environment/environment-variables/${name}`, { value });
     return response.data;
-  },
-
-  createEnvironmentVariable: async (name: string, value: string) => {
-    const response = await apiClient.post('/api/admin/environment/environment-variables', { name, value });
-    return response.data;
-  },
-
-  deleteEnvironmentVariable: async (name: string) => {
+  },deleteEnvironmentVariable: async (name: string) => {
     const response = await apiClient.delete(`/api/admin/environment/environment-variables/${name}`);
     return response.data;
-  },
-
-  bulkUpdateEnvironmentVariables: async (updates: Record<string, string>) => {
-    const response = await apiClient.post('/api/admin/environment/environment-variables/bulk-update', updates);
-    return response.data;
-  },
-
-  reloadEnvironmentVariables: async () => {
+  },reloadEnvironmentVariables: async () => {
     try {
       console.log('🔄 Calling reload environment variables API...');
       const response = await apiClient.post('/api/admin/environment/environment-variables/reload');
@@ -184,20 +152,7 @@ export const adminAPI = {
   getOrganizations: async () => {
     const response = await apiClient.get('/api/admin/organizations');
     return response.data.organizations || response.data; // Handle both response formats
-  },
-
-  createOrganization: async (orgData: {
-    name: string;
-    description?: string;
-    type?: string;
-    slug?: string;
-    is_active?: boolean;
-  }) => {
-    const response = await apiClient.post('/api/admin/organizations', orgData);
-    return response.data;
-  },
-
-  updateOrganization: async (orgId: number, orgData: {
+  },updateOrganization: async (orgId: number, orgData: {
     name?: string;
     description?: string;
     type?: string;
@@ -222,22 +177,7 @@ export const adminAPI = {
   }) => {
     const response = await apiClient.get('/api/admin/users', { params });
     return response.data.users || response.data; // Handle both response formats
-  },
-
-  createUser: async (userData: {
-    email: string;
-    password: string;
-    full_name: string;
-    role?: string;
-    is_active?: boolean;
-    is_superuser?: boolean;
-    organization_id?: number;
-  }) => {
-    const response = await apiClient.post('/api/admin/users', userData);
-    return response.data;
-  },
-
-  updateUser: async (userId: number, userData: {
+  },updateUser: async (userId: number, userData: {
     full_name?: string;
     role?: string;
     is_active?: boolean;
@@ -256,32 +196,6 @@ export const adminAPI = {
     return response.data;
   },
 
-  // Database cleanup endpoints
-  getCleanupStats: async () => {
-    const response = await apiClient.get('/api/admin/cleanup/stats');
-    return response.data;
-  },
-
-  cleanupOrphanedDatasets: async (confirm: boolean = false) => {
-    const response = await apiClient.post('/api/admin/cleanup/orphaned-datasets', null, {
-      params: { confirm }
-    });
-    return response.data;
-  },
-
-  cleanupEmptyOrganizations: async (confirm: boolean = false) => {
-    const response = await apiClient.post('/api/admin/cleanup/empty-organizations', null, {
-      params: { confirm }
-    });
-    return response.data;
-  },
-
-  cleanupAllOrphanedData: async (confirm: boolean = false) => {
-    const response = await apiClient.post('/api/admin/cleanup/all', null, {
-      params: { confirm }
-    });
-    return response.data;
-  },
 };
 
 // Organizations API
@@ -321,10 +235,10 @@ export const datasetsAPI = {
     sharing_level?: string;
     dataset_type?: string;
   }) => {
-    const response = await apiClient.get('/api/datasets', { params });
+    const response = await apiClient.get('/api/datasets/', { params });
     return response.data;
   },
-  
+
   createDataset: async (datasetData: {
     name: string;
     description?: string;
@@ -336,7 +250,7 @@ export const datasetsAPI = {
     allow_download?: boolean;
     allow_api_access?: boolean;
   }) => {
-    const response = await apiClient.post('/api/datasets', datasetData);
+    const response = await apiClient.post('/api/datasets/', datasetData);
     return response.data;
   },
   
@@ -427,12 +341,13 @@ export const datasetsAPI = {
     name: string;
     description?: string;
     sharing_level?: string;
+    agri_tags?: AgriTags;
   }) => {
     const formData = new FormData();
     formData.append('file', file);
     Object.entries(metadata).forEach(([key, value]) => {
       if (value !== undefined) {
-        formData.append(key, value.toString());
+        formData.append(key, typeof value === 'object' ? JSON.stringify(value) : value.toString());
       }
     });
 
@@ -566,20 +481,6 @@ export const dataSharingAPI = {
     return response.data;
   },
 
-  getSharedDatasetData: async (shareToken: string, page: number = 1, limit: number = 50) => {
-    const response = await apiClient.get(`/api/data-sharing/shared/${shareToken}/data`, {
-      params: { page, limit }
-    });
-    return response.data;
-  },
-
-  accessSharedDatasetWithPassword: async (shareToken: string, password: string) => {
-    const response = await apiClient.post(`/api/data-sharing/shared/${shareToken}/access`, {
-      password
-    });
-    return response.data;
-  },
-
   getMySharedDatasets: async (includeInvalid: boolean = true) => {
     const response = await apiClient.get(`/api/data-sharing/my-shared-datasets?include_invalid=${includeInvalid}`);
     return response.data;
@@ -590,8 +491,11 @@ export const dataSharingAPI = {
     return response.data;
   },
 
-  getDatasetAnalytics: async (datasetId: number) => {
-    const response = await apiClient.get(`/api/data-sharing/analytics/${datasetId}`);
+  createChatSession: async (shareToken: string, password?: string) => {
+    const response = await apiClient.post('/api/data-sharing/chat/create-session', {
+      share_token: shareToken,
+      password
+    });
     return response.data;
   },
 
@@ -607,22 +511,25 @@ export const dataSharingAPI = {
     return response.data;
   },
 
-  accessPublicSharedDatasetWithPassword: async (shareToken: string, password: string) => {
-    const response = await apiClient.get(`/api/data-sharing/public/shared/${shareToken}`, {
-      params: { password }
+  // Chat with shared dataset (public endpoint)
+  chatWithSharedDataset: async (shareToken: string, message: string, sessionToken?: string, password?: string) => {
+    const response = await apiClient.post(`/api/data-sharing/public/shared/${shareToken}/chat`, {
+      message,
+      session_token: sessionToken,
+      password
     });
     return response.data;
   },
 
-  // Chat with shared dataset (public endpoint)
-  chatWithSharedDataset: async (shareToken: string, message: string, sessionToken?: string) => {
-    const response = await apiClient.post(`/api/data-sharing/public/shared/${shareToken}/chat`, {
-      message,
-      session_token: sessionToken
-    });
+  analyzeSharedDataset: async (shareToken: string, options: {
+    query?: string;
+    password?: string;
+    max_visualizations?: number;
+  } = {}) => {
+    const response = await apiClient.post(`/api/data-sharing/public/shared/${shareToken}/analyze`, options);
     return response.data;
   },
-  
+
   // File management for shared datasets
   getSharedDatasetFiles: async (shareToken: string, password?: string) => {
     const params = password ? { password } : {};
@@ -687,33 +594,7 @@ export const dataSharingAPI = {
   },
 };
 
-// Chat API
-export const chatAPI = {
-  createChatSession: async (shareToken: string) => {
-    const response = await apiClient.post('/api/data-sharing/chat/create-session', {
-      share_token: shareToken
-    });
-    return response.data;
-  },
-
-  sendMessage: async (sessionToken: string, message: string) => {
-    const response = await apiClient.post('/api/data-sharing/chat/message', {
-      session_token: sessionToken,
-      message
-    });
-    return response.data;
-  },
-
-  getChatHistory: async (sessionToken: string) => {
-    const response = await apiClient.get(`/api/data-sharing/chat/${sessionToken}/history`);
-    return response.data;
-  },
-
-  endChatSession: async (sessionToken: string) => {
-    const response = await apiClient.delete(`/api/data-sharing/chat/${sessionToken}`);
-    return response.data;
-  },
-};
+// Chat API;
 
 // MindsDB API
 export const mindsdbAPI = {
@@ -721,144 +602,69 @@ export const mindsdbAPI = {
     const response = await apiClient.get('/api/mindsdb/status');
     return response.data;
   },
-  
-  getModels: async () => {
-    const response = await apiClient.get('/api/mindsdb/models');
-    return response.data;
-  },
-  
-  createModel: async (modelData: { name: string; query: string; engine?: string }) => {
-    const response = await apiClient.post('/api/mindsdb/models', modelData);
-    return response.data;
-  },
-  
-  getModelInfo: async (modelName: string) => {
-    const response = await apiClient.get(`/api/mindsdb/models/${modelName}`);
-    return response.data;
-  },
-  
-  predict: async (modelName: string, data: Record<string, any>) => {
-    const response = await apiClient.post(`/api/mindsdb/models/${modelName}/predict`, data);
-    return response.data;
-  },
-  
-  deleteModel: async (modelName: string) => {
-    const response = await apiClient.delete(`/api/mindsdb/models/${modelName}`);
-    return response.data;
-  },
-  
-  getDatabases: async () => {
-    const response = await apiClient.get('/api/mindsdb/databases');
-    return response.data;
-  },
-  
-  createDatabase: async (dbData: { name: string; engine: string; parameters: Record<string, any> }) => {
-    const response = await apiClient.post('/api/mindsdb/databases', dbData);
-    return response.data;
-  },
-  
-  executeSQL: async (query: string) => {
-    const response = await apiClient.post('/api/mindsdb/sql', { query });
-    return response.data;
-  },
-
-  // Gemini Flash 2 Integration
-  initializeGemini: async () => {
-    const response = await apiClient.post('/api/mindsdb/gemini/initialize');
-    return response.data;
-  },
-
-  geminiChat: async (prompt: string) => {
-    const response = await apiClient.post('/api/mindsdb/gemini/chat', { prompt });
-    return response.data;
-  },
-
-  naturalLanguageToSQL: async (query: string, context?: string) => {
-    const response = await apiClient.post('/api/mindsdb/gemini/nl-to-sql', { query, context });
-    return response.data;
-  },
-
-  createGeminiModel: async (modelData: {
-    name: string;
-    model_type?: string;
-    prompt_template?: string;
-    mode?: string;
-  }) => {
-    const response = await apiClient.post('/api/mindsdb/gemini/models', modelData);
-    return response.data;
-  },
-
-  queryGeminiModel: async (modelName: string, inputData: Record<string, any>) => {
-    const response = await apiClient.post(`/api/mindsdb/gemini/models/${modelName}/query`, { input_data: inputData });
-    return response.data;
-  },
-
-  getGeminiEngineStatus: async () => {
-    const response = await apiClient.get('/api/mindsdb/gemini/engine/status');
-    return response.data;
-  },
-
-  createGeminiVisionModel: async (modelData: {
-    name: string;
-    img_url_column?: string;
-    context_column?: string;
-  }) => {
-    const response = await apiClient.post('/api/mindsdb/gemini/vision/model', modelData);
-    return response.data;
-  },
-
-  createGeminiEmbeddingModel: async (modelData: {
-    name: string;
-    question_column?: string;
-    context_column?: string;
-  }) => {
-    const response = await apiClient.post('/api/mindsdb/gemini/embedding/model', modelData);
-    return response.data;
-  },
-};
+};;
 
 // Models API
+export interface DatasetModelInfo {
+  id: number;
+  dataset_id: number;
+  name: string;
+  model_type: string;
+  mindsdb_model_name: string;
+  target_column: string | null;
+  feature_columns: string[] | null;
+  engine_type: string | null;
+  status: string;
+  accuracy: string | null;
+  training_time: number | null;
+  prediction_count: number;
+  error_message: string | null;
+  is_active: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ModelStatusInfo {
+  id: number;
+  status: string;
+  accuracy: string | null;
+  training_time: number | null;
+  error_message: string | null;
+  last_updated: string | null;
+}
+
 export const modelsAPI = {
-  getModels: async (params?: {
-    skip?: number;
-    limit?: number;
-    status?: string;
-  }) => {
-    const response = await apiClient.get('/api/models', { params });
+  listModels: async (): Promise<DatasetModelInfo[]> => {
+    const response = await apiClient.get('/api/models');
     return response.data;
   },
 
-  createModel: async (modelData: {
-    name: string;
+  trainModel: async (params: {
     dataset_id: number;
     target_column: string;
-    feature_columns?: string[];
-    model_type: string;
-    engine?: string;
-    model_params?: Record<string, any>;
-  }) => {
-    const response = await apiClient.post('/api/models', modelData);
+    name?: string;
+  }): Promise<DatasetModelInfo> => {
+    const response = await apiClient.post('/api/models', params);
     return response.data;
   },
 
-  getModel: async (modelId: number) => {
+  getModel: async (modelId: number): Promise<DatasetModelInfo> => {
     const response = await apiClient.get(`/api/models/${modelId}`);
     return response.data;
   },
 
-  deleteModel: async (modelId: number) => {
-    const response = await apiClient.delete(`/api/models/${modelId}`);
+  getModelStatus: async (modelId: number): Promise<ModelStatusInfo> => {
+    const response = await apiClient.get(`/api/models/${modelId}/status`);
     return response.data;
   },
 
-  predict: async (modelId: number, data: Record<string, any>) => {
-    const response = await apiClient.post(`/api/models/${modelId}/predict`, data);
+  predict: async (modelId: number, input: Record<string, any>): Promise<{ id: number; predictions: Record<string, any>[] }> => {
+    const response = await apiClient.post(`/api/models/${modelId}/predict`, { input });
     return response.data;
   },
 
-  retrainModel: async (modelId: number) => {
-    const response = await apiClient.post(`/api/models/${modelId}/retrain`);
-    return response.data;
+  deleteModel: async (modelId: number): Promise<void> => {
+    await apiClient.delete(`/api/models/${modelId}`);
   },
 };
 
@@ -956,41 +762,7 @@ export const dataAccessAPI = {
     return response.data;
   },
 };
-
-// Analytics API
-export const analyticsAPI = {
-  getOrganizationAnalytics: async () => {
-    const response = await apiClient.get('/api/analytics/organization');
-    return response.data;
-  },
-
-  getUserActivity: async (params?: {
-    start_date?: string;
-    end_date?: string;
-    user_id?: number;
-  }) => {
-    const response = await apiClient.get('/api/analytics/user-activity', { params });
-    return response.data;
-  },
-
-  getDatasetUsage: async (params?: {
-    start_date?: string;
-    end_date?: string;
-    dataset_id?: number;
-  }) => {
-    const response = await apiClient.get('/api/analytics/dataset-usage', { params });
-    return response.data;
-  },
-
-  getModelPerformance: async (params?: {
-    start_date?: string;
-    end_date?: string;
-    model_id?: number;
-  }) => {
-    const response = await apiClient.get('/api/analytics/model-performance', { params });
-    return response.data;
-  },
-};
+;
 
 // Data Connectors API
 export const dataConnectorsAPI = {
@@ -1065,121 +837,105 @@ export const dataConnectorsAPI = {
     return response.data;
   },
 };
+// ── Agri reference data & Regional Aggregate ──────────────────────────
 
-// Proxy Connectors API
-export const proxyConnectorsAPI = {
-  getProxyConnectors: async () => {
-    const response = await apiClient.get('/api/proxy-connectors');
+export interface AgriRegion {
+  id: number;
+  name: string;
+  code: string | null;
+  is_active: boolean;
+}
+
+export interface AgriCrop {
+  id: number;
+  name: string;
+  is_active: boolean;
+}
+
+export interface AgriTags {
+  region_id: number;
+  crop_id: number;
+  season: string;
+  yield_column: string;
+}
+
+export interface YieldSuggestion {
+  dataset_id: number | null;
+  suggestion: string | null;
+  numeric_columns: string[];
+}
+
+export interface RegionalAggregate {
+  state: 'ready' | 'not-enough-data';
+  pooled_mean_yield: number | null;
+  contributor_count: number;
+  minimum: number;
+  region_id: number;
+  crop_id: number;
+  season: string;
+}
+
+export interface RegionSuggestion {
+  region_id: number;
+  region_name: string;
+}
+
+export interface RegionSuggestionResult {
+  suggestion: RegionSuggestion | null;
+  region_column: string | null;
+}
+
+export const agriAPI = {
+  listRegions: async (): Promise<AgriRegion[]> => {
+    const response = await apiClient.get('/api/agri/regions');
     return response.data;
   },
 
-  createProxyConnector: async (connectorData: {
-    name: string;
-    connector_type: string;
-    description?: string;
-    real_connection_config: Record<string, any>;
-    real_credentials: Record<string, any>;
-    is_public?: boolean;
-    allowed_operations?: string[];
-  }) => {
-    const response = await apiClient.post('/api/proxy-connectors', connectorData);
+  listCrops: async (): Promise<AgriCrop[]> => {
+    const response = await apiClient.get('/api/agri/crops');
     return response.data;
   },
 
-  getProxyConnector: async (connectorId: number) => {
-    const response = await apiClient.get(`/api/proxy-connectors/${connectorId}`);
-    return response.data;
-  },
-
-  deleteProxyConnector: async (connectorId: number) => {
-    const response = await apiClient.delete(`/api/proxy-connectors/${connectorId}`);
-    return response.data;
-  },
-
-  executeProxyOperation: async (proxyId: string, operationData: {
-    operation_type: string;
-    operation_data: Record<string, any>;
-  }) => {
-    const response = await apiClient.post(`/api/proxy/${proxyId}/execute`, operationData);
-    return response.data;
-  },
-
-  getProxyAnalytics: async (connectorId: number) => {
-    const response = await apiClient.get(`/api/proxy-connectors/${connectorId}/analytics`);
-    return response.data;
-  },
-};
-
-// Shared Links API
-export const sharedLinksAPI = {
-  getSharedLinks: async () => {
-    const response = await apiClient.get('/api/shared-links');
-    return response.data;
-  },
-
-  createSharedLink: async (linkData: {
-    proxy_connector_id: number;
-    name: string;
-    description?: string;
-    is_public?: boolean;
-    requires_authentication?: boolean;
-    allowed_users?: string[];
-    max_uses?: number;
-  }) => {
-    const response = await apiClient.post('/api/shared-links', linkData);
-    return response.data;
-  },
-
-  accessSharedLink: async (shareId: string) => {
-    const response = await apiClient.get(`/api/share/${shareId}`);
-    return response.data;
-  },
-};
-
-// Agents API
-export const agentsAPI = {
-  // Get available agents
-  getAvailableAgents: async () => {
-    const response = await apiClient.get('/api/agents/');
-    return response.data;
-  },
-
-  // Chat with dataset using agents
-  chatWithDatasetAgents: async (datasetId: number, message: string, agentName?: string) => {
-    const response = await apiClient.post(`/api/agents/datasets/${datasetId}/chat`, {
-      message,
-      agent_name: agentName
+  // Suggest a yield column for a not-yet-uploaded file (wizard step 2).
+  suggestYieldColumnForFile: async (file: File): Promise<YieldSuggestion> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await apiClient.post('/api/agri/suggest-yield-column/file', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
     });
     return response.data;
   },
 
-  // Execute code generated by agents
-  executeAgentCode: async (datasetId: number, code: string) => {
-    const response = await apiClient.post(`/api/agents/datasets/${datasetId}/execute`, {
-      code
+  // Pre-suggest a region from a recognizable region-like column (wizard step 3).
+  suggestRegionForFile: async (file: File): Promise<RegionSuggestionResult> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await apiClient.post('/api/agri/suggest-region/file', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
     });
     return response.data;
   },
 
-  // Get agent templates
-  getAgentTemplates: async () => {
-    const response = await apiClient.get('/api/agents/templates');
+  regionalAggregate: async (params: {
+    region_id: number;
+    crop_id: number;
+    season: string;
+  }): Promise<RegionalAggregate> => {
+    const response = await apiClient.get('/api/agri/regional-aggregate', { params });
     return response.data;
   },
 
-  // Get chat history for dataset with agents
-  getDatasetChatHistory: async (datasetId: number, limit: number = 50, offset: number = 0) => {
-    const response = await apiClient.get(`/api/agents/datasets/${datasetId}/chat/history`, {
-      params: { limit, offset }
-    });
+  cropClassifierStatus: async (): Promise<CropClassifierStatus> => {
+    const response = await apiClient.get('/api/agri/crop-classifier');
     return response.data;
   },
-
-  // Health check for agent system
-  healthCheck: async () => {
-    const response = await apiClient.get('/api/agents/health');
-    return response.data;
-  }
 };
+
+export interface CropClassifierStatus {
+  state: string; // "none" | "training" | "complete" | "error"
+  model_id: number | null;
+  accuracy: string | null;
+  error_message: string | null;
+}
 
 export default apiClient;

@@ -108,23 +108,6 @@ class DatasetResponse(DatasetBase):
         from_attributes = True
 
 
-class DatasetUpload(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    sharing_level: DataSharingLevel = DataSharingLevel.PRIVATE
-
-
-class DatasetStats(BaseModel):
-    dataset_id: int
-    total_size: Optional[int] = None
-    row_count: Optional[int] = None
-    column_count: Optional[int] = None
-    sharing_level: DataSharingLevel
-    created_at: datetime
-    last_accessed: Optional[datetime] = None
-    recent_access: List[Dict[str, Any]] = []
-
-
 class DatasetAccessLog(BaseModel):
     id: int
     dataset_id: int

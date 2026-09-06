@@ -6,8 +6,8 @@
   "devCommand": "npm run dev",
   
   "env": {
-    "NEXT_PUBLIC_APP_NAME": "AI Share Platform",
-    "NEXT_PUBLIC_APP_VERSION": "1.0.0"
+    "NEXT_PUBLIC_APP_NAME": "Entrust Data Sharing MCP Platform",
+    "NEXT_PUBLIC_APP_VERSION": "2.0.0"
   },
   
   "headers": [

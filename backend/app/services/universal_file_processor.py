@@ -120,7 +120,7 @@ class UniversalFileProcessor:
             
             try:
                 # Extract metadata based on file type
-                metadata = await self._extract_metadata(temp_file_path, file.filename, file_type, file_content)
+                metadata = await self._extract_metadata(temp_file_path, file.filename, file_type, file_content, file_hash)
                 
                 # Generate storage path
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -172,7 +172,7 @@ class UniversalFileProcessor:
             logger.error(f"❌ Failed to process file {file.filename}: {str(e)}")
             raise
 
-    async def _extract_metadata(self, file_path: str, filename: str, file_type: FileType, file_content: bytes) -> Dict[str, Any]:
+    async def _extract_metadata(self, file_path: str, filename: str, file_type: FileType, file_content: bytes, file_hash: str) -> Dict[str, Any]:
         """Extract comprehensive metadata from file"""
         import mimetypes
         
@@ -180,7 +180,7 @@ class UniversalFileProcessor:
             'filename': filename,
             'size_bytes': len(file_content),
             'mime_type': mimetypes.guess_type(filename)[0],
-            'file_hash': hashlib.sha256(file_content).hexdigest(),
+            'file_hash': file_hash,
             'processed_at': datetime.utcnow().isoformat(),
             'processor': 'UniversalFileProcessor',
             'type': file_type.value

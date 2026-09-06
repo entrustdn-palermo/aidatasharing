@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from typing import Dict, List, Any
 from app.core.auth import get_current_active_user
 from app.models.user import User
+from app.services.agent_gateway import AgentGateway
 from app.services.mindsdb import mindsdb_service
 
 router = APIRouter()

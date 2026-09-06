@@ -182,8 +182,7 @@ async def verify_storage_integrity(
             # Check single-file datasets
             if dataset.file_path and not dataset.is_multi_file_dataset:
                 verification_result['files_checked'] += 1
-                file_content = await storage_service.retrieve_dataset_file(dataset.file_path)
-                if file_content is None:
+                if not await storage_service.dataset_file_exists(dataset.file_path):
                     verification_result['missing_files'].append({
                         'type': 'dataset',
                         'dataset_id': dataset.id,
@@ -201,8 +200,7 @@ async def verify_storage_integrity(
                 
                 for df in dataset_files:
                     verification_result['files_checked'] += 1
-                    file_content = await storage_service.retrieve_dataset_file(df.relative_path or df.file_path)
-                    if file_content is None:
+                    if not await storage_service.dataset_file_exists(df.relative_path or df.file_path):
                         verification_result['missing_files'].append({
                             'type': 'dataset_file',
                             'dataset_id': dataset.id,

@@ -12,7 +12,7 @@ import logging
 from app.core.database import get_db
 from app.core.auth import get_current_user, get_optional_user
 from app.models.user import User
-from app.services.unified_proxy_service import unified_proxy
+# from app.services.unified_proxy_service import unified_proxy  # Archived
 from app.services.storage import StorageService
 
 logger = logging.getLogger(__name__)

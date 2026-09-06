@@ -14,6 +14,7 @@ from app.models.dataset import Dataset, DatasetDownload
 from app.models.user import User
 from app.services.storage import storage_service
 from app.services.data_sharing import DataSharingService
+from app.services.download_token import download_token_service
 from app.services.download_validator import DownloadValidator
 from app.services.error_handler import DownloadErrorHandler
 from app.services.download_progress import DownloadProgressTracker
@@ -93,7 +94,7 @@ class DownloadService:
             dataset = self.db.query(Dataset).filter(Dataset.id == dataset_id).first()
             
             # Generate secure download token
-            download_token = storage_service.generate_download_token(
+            download_token = download_token_service.generate(
                 dataset_id=dataset_id,
                 user_id=user.id,
                 expires_in_hours=24
@@ -170,7 +171,7 @@ class DownloadService:
         try:
             # Validate token format
             logger.info(f"Validating download token: {download_token[:20]}...")
-            if not storage_service.validate_download_token(download_token):
+            if not download_token_service.validate(download_token):
                 logger.error(f"Invalid token format for token: {download_token}")
                 error = self.error_handler.handle_permission_error(
                     dataset=None,

@@ -6,15 +6,17 @@ Handles file storage operations for datasets with multiple backend support
 import os
 import hashlib
 import uuid
-import secrets
 import mimetypes
 from typing import Dict, Any, Optional, BinaryIO, AsyncGenerator
 from datetime import datetime, timedelta
 import logging
 from fastapi import UploadFile, HTTPException, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse, FileResponse
 import aiofiles
 import asyncio
+
+from app.core.config import settings
 
 # Optional S3 imports
 try:
@@ -34,7 +36,10 @@ class BaseStorageBackend:
     
     async def retrieve_file(self, file_path: str) -> Optional[bytes]:
         raise NotImplementedError
-    
+
+    async def file_exists(self, file_path: str) -> bool:
+        raise NotImplementedError
+
     async def delete_file(self, file_path: str) -> bool:
         raise NotImplementedError
     
@@ -91,17 +96,21 @@ class LocalStorageBackend(BaseStorageBackend):
         """Retrieve file from local filesystem"""
         try:
             full_path = os.path.join(self.storage_dir, file_path)
-            
-            if os.path.exists(full_path):
-                with open(full_path, "rb") as f:
-                    return f.read()
-            
+
+            if await run_in_threadpool(os.path.exists, full_path):
+                async with aiofiles.open(full_path, "rb") as f:
+                    return await f.read()
+
             return None
-            
+
         except Exception as e:
             logger.error(f"Local file retrieval failed: {str(e)}")
             return None
-    
+
+    async def file_exists(self, file_path: str) -> bool:
+        full_path = os.path.join(self.storage_dir, file_path)
+        return await run_in_threadpool(os.path.exists, full_path)
+
     async def delete_file(self, file_path: str) -> bool:
         """Delete file from local filesystem"""
         try:
@@ -221,12 +230,12 @@ class S3StorageBackend(BaseStorageBackend):
     async def store_file(self, file_content: bytes, file_path: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """Store file in S3-compatible storage"""
         try:
-            # Upload to S3
-            self.s3_client.put_object(
+            await run_in_threadpool(
+                self.s3_client.put_object,
                 Bucket=self.bucket_name,
                 Key=file_path,
                 Body=file_content,
-                Metadata={k: str(v) for k, v in metadata.items()}  # S3 metadata must be strings
+                Metadata={k: str(v) for k, v in metadata.items()}
             )
             
             logger.info(f"File stored in S3: {file_path}")
@@ -246,22 +255,49 @@ class S3StorageBackend(BaseStorageBackend):
     async def retrieve_file(self, file_path: str) -> Optional[bytes]:
         """Retrieve file from S3-compatible storage"""
         try:
-            response = self.s3_client.get_object(Bucket=self.bucket_name, Key=file_path)
-            return response['Body'].read()
-            
+            response = await run_in_threadpool(
+                self.s3_client.get_object,
+                Bucket=self.bucket_name,
+                Key=file_path
+            )
+            return await run_in_threadpool(response['Body'].read)
+
         except ClientError as e:
-            if e.response['Error']['Code'] == 'NoSuchKey':
+            if e.response['Error']['Code'] in ('NoSuchKey', '404'):
                 return None
             logger.error(f"S3 file retrieval failed: {str(e)}")
             return None
         except Exception as e:
             logger.error(f"S3 file retrieval failed: {str(e)}")
             return None
-    
+
+    async def file_exists(self, file_path: str) -> bool:
+        try:
+            await run_in_threadpool(
+                self.s3_client.head_object,
+                Bucket=self.bucket_name,
+                Key=file_path
+            )
+            return True
+        except ClientError as e:
+            error = e.response.get('Error', {})
+            status_code = e.response.get('ResponseMetadata', {}).get('HTTPStatusCode')
+            if error.get('Code') in ('NoSuchKey', '404', 'NotFound') or status_code == 404:
+                return False
+            logger.error(f"S3 file existence check failed: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"S3 file existence check failed: {str(e)}")
+            raise
+
     async def delete_file(self, file_path: str) -> bool:
         """Delete file from S3-compatible storage"""
         try:
-            self.s3_client.delete_object(Bucket=self.bucket_name, Key=file_path)
+            await run_in_threadpool(
+                self.s3_client.delete_object,
+                Bucket=self.bucket_name,
+                Key=file_path
+            )
             logger.info(f"File deleted from S3: {file_path}")
             return True
             
@@ -272,25 +308,31 @@ class S3StorageBackend(BaseStorageBackend):
     async def get_file_stream(self, file_path: str) -> StreamingResponse:
         """Get file as streaming response from S3-compatible storage"""
         try:
-            # Get object metadata first
-            head_response = self.s3_client.head_object(Bucket=self.bucket_name, Key=file_path)
+            head_response = await run_in_threadpool(
+                self.s3_client.head_object,
+                Bucket=self.bucket_name,
+                Key=file_path
+            )
             file_size = head_response['ContentLength']
             content_type = head_response.get('ContentType', 'application/octet-stream')
             filename = os.path.basename(file_path)
-            
-            # Stream file from S3
+
             async def s3_file_stream():
-                response = self.s3_client.get_object(Bucket=self.bucket_name, Key=file_path)
+                response = await run_in_threadpool(
+                    self.s3_client.get_object,
+                    Bucket=self.bucket_name,
+                    Key=file_path
+                )
                 body = response['Body']
-                
+
                 try:
                     while True:
-                        chunk = body.read(8192)  # 8KB chunks
+                        chunk = await run_in_threadpool(body.read, 8192)
                         if not chunk:
                             break
                         yield chunk
                 finally:
-                    body.close()
+                    await run_in_threadpool(body.close)
             
             response = StreamingResponse(s3_file_stream(), media_type=content_type)
             response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
@@ -340,16 +382,16 @@ class StorageService:
             # Try to get from settings first, then fall back to environment, then default
             try:
                 from app.core.config import settings
-                storage_dir = settings.STORAGE_BASE_PATH
+                storage_dir = settings.DATASET_STORAGE_PATH
                 logger.info(f"Using storage directory from settings: {storage_dir}")
-            except ImportError:
-                storage_dir = os.getenv('STORAGE_DIR', 
+            except (ImportError, AttributeError):
+                storage_dir = os.getenv('STORAGE_DIR',
                     os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "storage"))
                 logger.info(f"Using storage directory from environment/default: {storage_dir}")
-            
+
             self.backend = LocalStorageBackend(storage_dir)
             logger.info("Initialized local storage backend")
-            
+
         elif storage_type in ['s3', 's3_compatible']:
             # Unified S3/S3-compatible storage configuration
             bucket_name = os.getenv('S3_BUCKET_NAME')
@@ -359,25 +401,25 @@ class StorageService:
             region = os.getenv('S3_REGION') or os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
             use_ssl = os.getenv('S3_USE_SSL', 'true').lower() == 'true'
             addressing_style = os.getenv('S3_ADDRESSING_STYLE', 'path')
-            
+
             # For AWS S3, set endpoint_url to None to use default
             if storage_type == 's3' and not endpoint_url:
                 endpoint_url = None
-                
+
             if not all([bucket_name, access_key, secret_key]):
                 logger.error("S3 configuration incomplete, falling back to local storage")
                 logger.error(f"Missing: bucket_name={bucket_name is not None}, access_key={access_key is not None}, secret_key={secret_key is not None}")
                 try:
                     from app.core.config import settings
-                    storage_dir = settings.STORAGE_BASE_PATH
-                except ImportError:
+                    storage_dir = settings.DATASET_STORAGE_PATH
+                except (ImportError, AttributeError):
                     storage_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "storage")
                 self.backend = LocalStorageBackend(storage_dir)
             else:
                 try:
                     if not S3_AVAILABLE:
                         raise ImportError("boto3 not available")
-                        
+
                     self.backend = S3StorageBackend(
                         bucket_name=bucket_name,
                         access_key=access_key,
@@ -393,7 +435,7 @@ class StorageService:
                     logger.error(f"S3 initialization failed: {str(e)}, falling back to local storage")
                     try:
                         from app.core.config import settings
-                        storage_dir = settings.STORAGE_BASE_PATH
+                        storage_dir = settings.DATASET_STORAGE_PATH
                     except ImportError:
                         storage_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "storage")
                     self.backend = LocalStorageBackend(storage_dir)
@@ -450,7 +492,15 @@ class StorageService:
     async def retrieve_dataset_file(self, file_path: str) -> Optional[bytes]:
         """Retrieve a dataset file using the configured backend"""
         return await self.backend.retrieve_file(file_path)
-    
+
+    async def dataset_file_exists(self, file_path: str) -> bool:
+        """Check whether a dataset file exists without loading its contents"""
+        return await self.backend.file_exists(file_path)
+
+    async def file_exists(self, file_path: str) -> bool:
+        """Check whether a file exists without loading its contents"""
+        return await self.backend.file_exists(file_path)
+
     def get_dataset_file_url(self, file_path: str, expires_in: int = 3600) -> Optional[str]:
         """Get a publicly accessible URL for a dataset file (for MindsDB integration)"""
         return self.backend.get_file_url(file_path, expires_in)
@@ -466,83 +516,15 @@ class StorageService:
     async def get_file_stream(self, file_path: str) -> StreamingResponse:
         """Get file as streaming response using the configured backend"""
         return await self.backend.get_file_stream(file_path)
-    
+
+    async def get_file_content(self, file_path: str) -> bytes:
+        """Get file content as bytes (for ZIP creation and other operations)"""
+        return await self.backend.retrieve_file(file_path)
+
     def get_file_url(self, file_path: str, expires_in: int = 3600) -> Optional[str]:
         """Get temporary URL for file access (if supported by backend)"""
         return self.backend.get_file_url(file_path, expires_in)
     
-    def generate_download_token(self, dataset_id: int, user_id: Optional[int] = None, expires_in_hours: int = 24) -> str:
-        """Generate a simple download token for a dataset"""
-        # Simple token generation without expiry
-        random_part = secrets.token_urlsafe(32)  # Longer random part for security
-        
-        # Create simple payload
-        payload_parts = [
-            str(dataset_id),
-            str(user_id) if user_id else "anon"
-        ]
-        payload = "-".join(payload_parts)
-        
-        # Create hash without secret key dependency
-        token_data = f"{payload}-{random_part}"
-        token_hash = hashlib.sha256(token_data.encode()).hexdigest()[:16]
-        
-        # Return simple format: payload.random.hash
-        return f"{payload}.{random_part}.{token_hash}"
-    
-    def validate_download_token(self, token: str) -> bool:
-        """Validate simple download token format"""
-        if not token or not isinstance(token, str):
-            return False
-        
-        try:
-            # Split token: payload.random.hash
-            parts = token.split(".")
-            if len(parts) != 3:
-                return False
-                
-            payload, random_part, provided_hash = parts
-            
-            # Validate payload format (dataset_id-user_id or dataset_id-anon)
-            if "-" not in payload:
-                return False
-                
-            payload_parts = payload.split("-")
-            if len(payload_parts) != 2:
-                return False
-                
-            dataset_id_str, user_id_str = payload_parts
-            
-            # Validate dataset_id is numeric
-            try:
-                int(dataset_id_str)
-            except ValueError:
-                return False
-            
-            # Validate user_id is numeric or "anon"
-            if user_id_str != "anon":
-                try:
-                    int(user_id_str)
-                except ValueError:
-                    return False
-            
-            # Validate random part length (should be ~43 chars for urlsafe_b64encode of 32 bytes)
-            if len(random_part) < 40:
-                return False
-            
-            # Validate hash format
-            if len(provided_hash) != 16:
-                return False
-            
-            # Verify hash
-            token_data = f"{payload}-{random_part}"
-            expected_hash = hashlib.sha256(token_data.encode()).hexdigest()[:16]
-            
-            return provided_hash == expected_hash
-            
-        except Exception as e:
-            logger.error(f"Token validation error: {str(e)}")
-            return False
     
     async def cleanup_orphaned_files(self, db_session) -> Dict[str, Any]:
         """Clean up files that no longer have corresponding dataset records"""
