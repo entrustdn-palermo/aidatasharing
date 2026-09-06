@@ -341,12 +341,13 @@ export const datasetsAPI = {
     name: string;
     description?: string;
     sharing_level?: string;
+    agri_tags?: AgriTags;
   }) => {
     const formData = new FormData();
     formData.append('file', file);
     Object.entries(metadata).forEach(([key, value]) => {
       if (value !== undefined) {
-        formData.append(key, value.toString());
+        formData.append(key, typeof value === 'object' ? JSON.stringify(value) : value.toString());
       }
     });
 
@@ -774,8 +775,73 @@ export const dataConnectorsAPI = {
     return response.data;
   },
 };
-;
-;
-;
+// ── Agri reference data & Regional Aggregate ──────────────────────────
+
+export interface AgriRegion {
+  id: number;
+  name: string;
+  code: string | null;
+  is_active: boolean;
+}
+
+export interface AgriCrop {
+  id: number;
+  name: string;
+  is_active: boolean;
+}
+
+export interface AgriTags {
+  region_id: number;
+  crop_id: number;
+  season: string;
+  yield_column: string;
+}
+
+export interface YieldSuggestion {
+  dataset_id: number | null;
+  suggestion: string | null;
+  numeric_columns: string[];
+}
+
+export interface RegionalAggregate {
+  state: 'ready' | 'not-enough-data';
+  pooled_mean_yield: number | null;
+  contributor_count: number;
+  minimum: number;
+  region_id: number;
+  crop_id: number;
+  season: string;
+}
+
+export const agriAPI = {
+  listRegions: async (): Promise<AgriRegion[]> => {
+    const response = await apiClient.get('/api/agri/regions');
+    return response.data;
+  },
+
+  listCrops: async (): Promise<AgriCrop[]> => {
+    const response = await apiClient.get('/api/agri/crops');
+    return response.data;
+  },
+
+  // Suggest a yield column for a not-yet-uploaded file (wizard step 2).
+  suggestYieldColumnForFile: async (file: File): Promise<YieldSuggestion> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await apiClient.post('/api/agri/suggest-yield-column/file', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  },
+
+  regionalAggregate: async (params: {
+    region_id: number;
+    crop_id: number;
+    season: string;
+  }): Promise<RegionalAggregate> => {
+    const response = await apiClient.get('/api/agri/regional-aggregate', { params });
+    return response.data;
+  },
+};
 
 export default apiClient;
