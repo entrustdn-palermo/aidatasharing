@@ -47,6 +47,11 @@ class CropCreate(BaseModel):
     name: str
 
 
+class RegionSuggestion(BaseModel):
+    region_id: int
+    region_name: str
+
+
 # ── Helpers ───────────────────────────────────────────────────────────
 
 def _to_region_response(region) -> RegionResponse:
@@ -195,6 +200,31 @@ async def suggest_yield_column_for_file(
     )
 
 
+# ── Region pre-suggestion (Story 9) ───────────────────────────────────
+
+class RegionSuggestionResponse(BaseModel):
+    suggestion: Optional[RegionSuggestion] = None
+    region_column: Optional[str] = None
+
+
+@router.post("/suggest-region/file", response_model=RegionSuggestionResponse)
+async def suggest_region_for_file(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Pre-suggest a Region for a not-yet-uploaded file (suggestion only).
+
+    Recognizes a region-like column (region/wilayah/provinsi) and matches
+    its values against the active reference list. Only a unanimous match
+    suggests; the user confirms or overrides in the wizard.
+    """
+    content = await file.read()
+    return AgriDataService(db).suggest_region_for_file(
+        content, file.filename or ""
+    )
+
+
 # ── Regional Aggregate (cross-org pool, ADR-0001) ─────────────────────
 
 class RegionalAggregateResponse(BaseModel):
@@ -225,6 +255,48 @@ async def get_regional_aggregate(
     return AgriDataService(db).compute_regional_aggregate(
         region_id, crop_id, season,
     )
+
+
+# ── Pooled crop classifier (Stories 19/24, ADR-0001) ──────────────────
+
+class CropClassifierTrainResponse(BaseModel):
+    state: str  # "training" | "error" | "not-enough-data"
+    model_id: Optional[int] = None
+    contributor_count: int
+    minimum: int
+    distinct_crops: Optional[int] = None
+    error_message: Optional[str] = None
+
+
+@router.post("/crop-classifier/train", response_model=CropClassifierTrainResponse)
+async def train_crop_classifier(
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Train/retrain the pooled crop-suitability classifier (admin).
+
+    Learns from the pooled rows of every Contributing Dataset — the same
+    qualification that governs Regional Aggregates (one pool, one policy).
+    Retraining replaces the previous classifier. Responses never expose
+    individual rows or contributor identities.
+    """
+    return AgriDataService(db).train_crop_classifier(current_user)
+
+
+class CropClassifierStatusResponse(BaseModel):
+    state: str  # "none" | "training" | "complete" | "error"
+    model_id: Optional[int] = None
+    accuracy: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+@router.get("/crop-classifier", response_model=CropClassifierStatusResponse)
+async def crop_classifier_status(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Status of the pooled crop classifier (any authenticated member)."""
+    return AgriDataService(db).crop_classifier_status()
 
 
 class ContributorMinimumResponse(BaseModel):

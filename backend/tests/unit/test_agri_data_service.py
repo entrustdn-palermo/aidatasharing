@@ -612,3 +612,300 @@ class TestYieldMeanFromStats:
             column_statistics={"columns": {"produksi": "corrupt"}},
         )
         assert AgriDataService._yield_mean_from_stats(ds) is None
+
+
+# ── Pooled crop classifier (Stories 19/24) ────────────────────────────
+
+
+import pandas as pd
+from types import SimpleNamespace
+
+from app.models.dataset import DatasetModel
+from app.models.user import User
+
+
+def make_gateway():
+    gw = Mock()
+    gw.upload_file_to_mindsdb.return_value = "agri_crop_classifier_1.csv"
+    gw.create_model.return_value = {"status": "success"}
+    gw.delete_model.return_value = True
+    gw.get_model_info.return_value = None
+    return gw
+
+
+def classifier_ds(id, crop_id, region_id=1, season="2026A", file_path=None):
+    """A contributing dataset row for classifier tests (file-backed)."""
+    return SimpleNamespace(
+        id=id, region_id=region_id, crop_id=crop_id, season=season,
+        yield_column="produksi", file_path=file_path or f"/fake/ds{id}.csv",
+        is_multi_file_dataset=False, is_active=True, is_deleted=False,
+        organization_id=10, column_statistics={"produksi": {"mean": 5.0}},
+    )
+
+
+def pool_of(n, crops=(1, 2)):
+    return [classifier_ds(i + 1, crop_id=crops[i % len(crops)]) for i in range(n)]
+
+
+class TestTrainCropClassifier:
+    def _svc(self, db_session, gw):
+        return AgriDataService(db_session, mindsdb_service=gw)
+
+    def test_below_contributor_minimum_not_enough_data(self, db_session):
+        gw = make_gateway()
+        svc = self._svc(db_session, gw)
+        db_session.first.return_value = None  # minimum default 5
+        db_session.all.side_effect = [pool_of(4), []]
+
+        result = svc.train_crop_classifier(User(id=1))
+
+        assert result["state"] == "not-enough-data"
+        assert result["contributor_count"] == 4
+        assert result["minimum"] == 5
+        gw.create_model.assert_not_called()
+        db_session.add.assert_not_called()
+
+    def test_single_crop_pool_not_enough_data(self, db_session):
+        """A classifier needs at least two classes — one crop can't learn."""
+        gw = make_gateway()
+        svc = self._svc(db_session, gw)
+        db_session.first.return_value = None
+        db_session.all.side_effect = [pool_of(5, crops=(1,)), []]
+
+        result = svc.train_crop_classifier(User(id=1))
+
+        assert result["state"] == "not-enough-data"
+        assert result["distinct_crops"] == 1
+        gw.create_model.assert_not_called()
+
+    def test_trains_over_pool_and_persists_pooled_row(self, db_session):
+        gw = make_gateway()
+        svc = self._svc(db_session, gw)
+        db_session.first.return_value = None
+        db_session.all.side_effect = [pool_of(5), []]
+        db_session.refresh.side_effect = lambda m: setattr(m, "id", 7)
+        frame = pd.DataFrame({
+            "region": ["Jawa Barat"] * 5, "season": ["2026A"] * 5,
+            "yield_value": [5.0] * 5, "crop": ["Padi", "Jagung"] * 2 + ["Padi"],
+        })
+        svc._build_pooled_training_frame = Mock(return_value=frame)
+
+        result = svc.train_crop_classifier(User(id=1))
+
+        assert result["state"] == "training"
+        assert result["model_id"] == 7
+        assert result["contributor_count"] == 5
+
+        model = db_session.add.call_args[0][0]
+        assert model.dataset_id is None  # pooled — belongs to no dataset
+        assert model.model_type == "classifier"
+        assert model.target_column == "crop"
+        assert model.feature_columns == ["region", "season", "yield_value"]
+        assert model.status == "training"
+
+        gw.create_model.assert_called_once()
+        args, kwargs = gw.create_model.call_args
+        assert args[0] == model.mindsdb_model_name
+        assert args[2] == "files"
+        assert "SELECT * FROM files." in args[1]
+        assert kwargs["predict"] == "crop"
+
+    def test_retrain_drops_previous_classifier(self, db_session):
+        gw = make_gateway()
+        svc = self._svc(db_session, gw)
+        db_session.first.return_value = None
+        old = DatasetModel(
+            id=3, dataset_id=None, name="agri_crop_classifier_100",
+            model_type="classifier", mindsdb_model_name="agri_crop_classifier_100",
+            status="complete",
+        )
+        db_session.all.side_effect = [pool_of(5), [old]]
+        frame = pd.DataFrame({
+            "region": ["A"], "season": ["2026A"], "yield_value": [1.0], "crop": ["Padi"],
+        })
+        svc._build_pooled_training_frame = Mock(return_value=frame)
+
+        result = svc.train_crop_classifier(User(id=1))
+
+        assert result["state"] == "training"
+        gw.delete_model.assert_called_once_with("agri_crop_classifier_100")
+        assert old.is_deleted is True
+        assert old.status == "deleted"
+
+    def test_create_model_failure_marks_row_error(self, db_session):
+        gw = make_gateway()
+        gw.create_model.return_value = {"status": "error", "error": "boom"}
+        svc = self._svc(db_session, gw)
+        db_session.first.return_value = None
+        db_session.all.side_effect = [pool_of(5), []]
+        frame = pd.DataFrame({
+            "region": ["A"], "season": ["2026A"], "yield_value": [1.0], "crop": ["Padi"],
+        })
+        svc._build_pooled_training_frame = Mock(return_value=frame)
+
+        result = svc.train_crop_classifier(User(id=1))
+
+        assert result["state"] == "error"
+        assert "boom" in result["error_message"]
+        model = db_session.add.call_args[0][0]
+        assert model.status == "error"
+
+    def test_upload_failure_marks_row_error(self, db_session):
+        gw = make_gateway()
+        gw.upload_file_to_mindsdb.return_value = None
+        svc = self._svc(db_session, gw)
+        db_session.first.return_value = None
+        db_session.all.side_effect = [pool_of(5), []]
+        frame = pd.DataFrame({
+            "region": ["A"], "season": ["2026A"], "yield_value": [1.0], "crop": ["Padi"],
+        })
+        svc._build_pooled_training_frame = Mock(return_value=frame)
+
+        result = svc.train_crop_classifier(User(id=1))
+
+        assert result["state"] == "error"
+        gw.create_model.assert_not_called()
+
+    def test_unparseable_pool_errors_without_training(self, db_session):
+        gw = make_gateway()
+        svc = self._svc(db_session, gw)
+        db_session.first.return_value = None
+        db_session.all.side_effect = [pool_of(5), []]
+        svc._build_pooled_training_frame = Mock(return_value=None)
+
+        result = svc.train_crop_classifier(User(id=1))
+
+        assert result["state"] == "error"
+        gw.create_model.assert_not_called()
+        db_session.add.assert_not_called()
+
+    def test_response_never_exposes_rows_or_identities(self, db_session):
+        gw = make_gateway()
+        svc = self._svc(db_session, gw)
+        db_session.first.return_value = None
+        db_session.all.side_effect = [pool_of(5), []]
+        frame = pd.DataFrame({
+            "region": ["A"], "season": ["2026A"], "yield_value": [1.0], "crop": ["Padi"],
+        })
+        svc._build_pooled_training_frame = Mock(return_value=frame)
+
+        result = svc.train_crop_classifier(User(id=1))
+
+        # Only counts, minimum, model id, state — no dataset ids, owners, rows
+        assert set(result.keys()) <= {
+            "state", "model_id", "contributor_count", "minimum", "distinct_crops",
+        }
+
+
+class TestBuildPooledTrainingFrame:
+    def _write_csv(self, tmp_path, name, rows):
+        path = tmp_path / name
+        path.write_text("plot,produksi\n" + rows)
+        return str(path)
+
+    def test_standardizes_features_and_target(self, db_session, tmp_path):
+        svc = AgriDataService(db_session)
+        f1 = self._write_csv(tmp_path, "a.csv", "1,5.2\n2,4.8\n")
+        f2 = self._write_csv(tmp_path, "b.csv", "1,3.1\n")
+        ds1 = classifier_ds(1, crop_id=1, file_path=f1)
+        ds2 = classifier_ds(2, crop_id=2, file_path=f2)
+        svc._resolve_storage_base = Mock(return_value=str(tmp_path))
+        svc._find_region = Mock(return_value=make_region(id=1, name="Jawa Barat"))
+        svc._find_crop = Mock(side_effect=lambda cid: make_crop(id=cid, name="Padi" if cid == 1 else "Jagung"))
+
+        frame = svc._build_pooled_training_frame([ds1, ds2])
+
+        assert list(frame.columns) == ["region", "season", "yield_value", "crop"]
+        assert len(frame) == 3
+        assert set(frame["crop"]) == {"Padi", "Jagung"}
+        assert set(frame["region"]) == {"Jawa Barat"}
+        # Names, not ids — the model learns human-readable classes
+        assert 1 not in set(frame["crop"])
+
+    def test_relative_paths_resolve_against_storage_base(self, db_session, tmp_path):
+        svc = AgriDataService(db_session)
+        f = self._write_csv(tmp_path, "rel.csv", "1,5.2\n")
+        rel = "sub/rel.csv"
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "rel.csv").write_text("plot,produksi\n1,5.2\n")
+        ds = classifier_ds(1, crop_id=1, file_path=rel)
+        svc._resolve_storage_base = Mock(return_value=str(tmp_path))
+        svc._find_region = Mock(return_value=make_region())
+        svc._find_crop = Mock(return_value=make_crop())
+
+        frame = svc._build_pooled_training_frame([ds])
+
+        assert frame is not None and len(frame) == 1
+
+    def test_skips_unreadable_and_unresolvable(self, db_session, tmp_path):
+        svc = AgriDataService(db_session)
+        good = self._write_csv(tmp_path, "good.csv", "1,5.2\n")
+        ds_good = classifier_ds(1, crop_id=1, file_path=good)
+        ds_missing = classifier_ds(2, crop_id=2, file_path="nope.csv")
+        ds_no_region = classifier_ds(3, crop_id=1, file_path=good, region_id=None)
+        ds_no_crop = classifier_ds(4, crop_id=None, file_path=good)
+        svc._resolve_storage_base = Mock(return_value=str(tmp_path))
+        svc._find_region = Mock(return_value=make_region())
+        svc._find_crop = Mock(return_value=make_crop())
+
+        frame = svc._build_pooled_training_frame([ds_good, ds_missing, ds_no_region, ds_no_crop])
+
+        assert len(frame) == 1
+        assert frame.iloc[0]["crop"] == "Padi"
+
+    def test_all_unreadable_returns_none(self, db_session):
+        svc = AgriDataService(db_session)
+        ds = classifier_ds(1, crop_id=1, file_path="gone.csv")
+        svc._resolve_storage_base = Mock(return_value="/nonexistent-base")
+        svc._find_region = Mock(return_value=make_region())
+        svc._find_crop = Mock(return_value=make_crop())
+
+        assert svc._build_pooled_training_frame([ds]) is None
+
+    def test_yield_column_missing_in_file_skipped(self, db_session, tmp_path):
+        svc = AgriDataService(db_session)
+        f = tmp_path / "x.csv"
+        f.write_text("plot,luas\n1,2.0\n")
+        ds = classifier_ds(1, crop_id=1, file_path=str(f))
+        svc._resolve_storage_base = Mock(return_value=str(tmp_path))
+        svc._find_region = Mock(return_value=make_region())
+        svc._find_crop = Mock(return_value=make_crop())
+
+        assert svc._build_pooled_training_frame([ds]) is None
+
+
+class TestCropClassifierStatus:
+    def test_none_when_no_model(self, db_session):
+        svc = AgriDataService(db_session, mindsdb_service=make_gateway())
+        db_session.first.return_value = None
+
+        assert svc.crop_classifier_status() == {"state": "none"}
+
+    def test_reports_stored_fields(self, db_session):
+        svc = AgriDataService(db_session, mindsdb_service=make_gateway())
+        model = DatasetModel(
+            id=9, dataset_id=None, name="m", model_type="classifier",
+            mindsdb_model_name="m", status="complete", accuracy="0.83",
+        )
+        db_session.first.return_value = model
+
+        result = svc.crop_classifier_status()
+
+        assert result["state"] == "complete"
+        assert result["model_id"] == 9
+        assert result["accuracy"] == "0.83"
+
+    def test_training_status_is_refreshed(self, db_session):
+        gw = make_gateway()
+        gw.get_model_info.return_value = {"status": "completed", "accuracy": "0.9"}
+        svc = AgriDataService(db_session, mindsdb_service=gw)
+        model = DatasetModel(
+            id=10, dataset_id=None, name="m", model_type="classifier",
+            mindsdb_model_name="m", status="training",
+        )
+        db_session.first.return_value = model
+
+        result = svc.crop_classifier_status()
+
+        assert result["state"] == "complete"
+        assert result["accuracy"] == "0.9"

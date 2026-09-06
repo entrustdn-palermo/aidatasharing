@@ -13,12 +13,18 @@ DatasetService pattern.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+import os
+import time
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.agri import Crop, Region
+
+if TYPE_CHECKING:
+    from app.models.user import User
+    from app.services.agent_gateway import AgentGateway
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +50,30 @@ def is_numeric_dtype(dtype: Any) -> bool:
     return getattr(dtype, "kind", None) in _NUMERIC_DTYPE_KINDS
 
 
+def _read_tabular_frame(content: bytes, extension: str):
+    """Parse uploaded tabular bytes into a DataFrame, or None.
+
+    Shared by column listing and region suggestion so both paths read files
+    identically. Anything non-tabular or unparseable yields None — the safe
+    direction for a consent-bearing tag.
+    """
+    if extension not in TABULAR_EXTENSIONS:
+        return None
+    try:
+        import io
+
+        import pandas as pd
+
+        if extension == "csv":
+            return pd.read_csv(io.BytesIO(content))
+        if extension == "parquet":
+            return pd.read_parquet(io.BytesIO(content))
+        return pd.read_excel(io.BytesIO(content))
+    except Exception as e:
+        logger.warning(f"Could not read columns from uploaded file: {e}")
+        return None
+
+
 def columns_of_file(content: bytes, extension: str) -> Tuple[List[str], List[str]]:
     """(all columns, numeric columns) of an uploaded tabular file.
 
@@ -51,25 +81,12 @@ def columns_of_file(content: bytes, extension: str) -> Tuple[List[str], List[str
     unparseable — returns ([], []), which makes every yield-column choice
     fail validation: the safe direction for a consent-bearing tag.
     """
-    if extension not in TABULAR_EXTENSIONS:
+    df = _read_tabular_frame(content, extension)
+    if df is None:
         return [], []
-    try:
-        import io
-
-        import pandas as pd
-
-        if extension == "csv":
-            df = pd.read_csv(io.BytesIO(content))
-        elif extension == "parquet":
-            df = pd.read_parquet(io.BytesIO(content))
-        else:
-            df = pd.read_excel(io.BytesIO(content))
-        columns = [str(col) for col in df.columns]
-        numeric = [col for col in columns if is_numeric_dtype(df[col].dtype)]
-        return columns, numeric
-    except Exception as e:
-        logger.warning(f"Could not read columns from uploaded file: {e}")
-        return [], []
+    columns = [str(col) for col in df.columns]
+    numeric = [col for col in columns if is_numeric_dtype(df[col].dtype)]
+    return columns, numeric
 
 
 def numeric_columns_of_dataset(dataset: Any) -> List[str]:
@@ -139,13 +156,28 @@ STARTER_CROPS: List[Dict[str, str]] = [
 
 
 class AgriDataService:
-    """Reference data for agricultural tagging: Regions and Crops."""
+    """Reference data for agricultural tagging: Regions and Crops.
+
+    Also owns the ADR-0001 pool policy: Contributing Dataset qualification,
+    Regional Aggregates, and pooled crop-classifier training orchestration.
+    """
 
     SEED_REGIONS = INDONESIA_PROVINCES
     SEED_CROPS = STARTER_CROPS
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, mindsdb_service: Optional["AgentGateway"] = None):
         self.db = db
+        # Lazily defaulted to the singleton so unit tests that inject a bare
+        # db mock never touch the gateway unless a training method runs.
+        self._mindsdb = mindsdb_service
+
+    @property
+    def mindsdb(self) -> "AgentGateway":
+        if self._mindsdb is None:
+            from app.services.mindsdb import mindsdb_service
+
+            self._mindsdb = mindsdb_service
+        return self._mindsdb
 
     # ── Browsing (member-facing) ──────────────────────────────────────
 
@@ -389,6 +421,74 @@ class AgriDataService:
             "numeric_columns": numeric_columns,
         }
 
+    # Column names that signal "this column holds a region" (Story 9).
+    REGION_NAME_KEYWORDS = ("region", "wilayah", "provinsi", "propinsi")
+
+    def suggest_region_for_file(
+        self, content: bytes, filename: str
+    ) -> Dict[str, Any]:
+        """Pre-suggest a Region for a not-yet-uploaded file (Story 9).
+
+        Two-step guess, mirroring the yield-column suggestion's restraint:
+        1. find a recognizable region-like column (name contains one of
+           REGION_NAME_KEYWORDS, case-insensitive);
+        2. match its values against the active Region reference list —
+           case-insensitively, by name or code.
+
+        A suggestion is returned only when every non-empty value resolves to
+        the *same* region; mixed or unrecognizable values yield None, because
+        a wrong pre-selection is worse than none for a consent-bearing tag.
+        The user always confirms or overrides in the wizard.
+
+        Payload: {"suggestion": {"region_id", "region_name"} | None,
+                  "region_column": str | None}
+        """
+        ext = filename.rsplit(".", 1)[-1].lower() if filename and "." in filename else ""
+        df = _read_tabular_frame(content, ext)
+        if df is None:
+            return {"suggestion": None, "region_column": None}
+
+        columns = [str(col) for col in df.columns]
+        region_column = None
+        for col in columns:
+            lowered = col.lower()
+            if any(keyword in lowered for keyword in self.REGION_NAME_KEYWORDS):
+                region_column = col
+                break
+        if region_column is None:
+            return {"suggestion": None, "region_column": None}
+
+        # Build lookup from the active reference list (name/code, lowercase).
+        lookup: Dict[str, Region] = {}
+        for region in self.list_regions():
+            lookup[region.name.lower()] = region
+            if region.code:
+                lookup[region.code.lower()] = region
+
+        matched: Optional[Region] = None
+        saw_value = False
+        for raw in df[region_column].tolist():
+            # Skip missing cells (None and pandas NaN — NaN != NaN).
+            if raw is None or (isinstance(raw, float) and raw != raw):
+                continue
+            text = str(raw).strip()
+            if not text:
+                continue
+            saw_value = True
+            region = lookup.get(text.lower())
+            if region is None or (matched is not None and region.id != matched.id):
+                # Unrecognizable value, or values pointing at different regions:
+                # no safe single suggestion exists.
+                return {"suggestion": None, "region_column": region_column}
+            matched = region
+
+        if not saw_value or matched is None:
+            return {"suggestion": None, "region_column": region_column}
+        return {
+            "suggestion": {"region_id": matched.id, "region_name": matched.name},
+            "region_column": region_column,
+        }
+
     def is_contributing_dataset(self, dataset: "Dataset") -> bool:
         """Whether a Dataset qualifies for the cross-org pool (ADR-0001).
 
@@ -585,6 +685,284 @@ class AgriDataService:
                     return mean
 
         return None
+
+    # ── Pooled crop classifier (Stories 19/24, ADR-0001) ─────────────
+
+    CROP_TARGET_COLUMN = "crop"
+    CLASSIFIER_FEATURES = ["region", "season", "yield_value"]
+
+    def train_crop_classifier(self, user: "User") -> Dict[str, Any]:
+        """Train (or retrain) the platform's crop-suitability classifier.
+
+        The model learns from the pooled rows of every Contributing Dataset
+        — the same qualification that governs Regional Aggregates, so one
+        consent act covers both (ADR-0001). Features are standardized to
+        ``region`` / ``season`` / ``yield_value`` with ``crop`` as the
+        target; contributor identities and individual rows never leave the
+        pool — the response carries only counts and the model id.
+
+        One global model, retrained as data arrives (the implementation
+        choice the issue defers to this service). Retraining replaces the
+        previous classifier: the old MindsDB model is dropped and its row
+        soft-deleted before the new CREATE MODEL is issued.
+
+        Returns ``{"state": "training" | "error" | "not-enough-data", ...}``.
+        """
+        from app.models.dataset import Dataset, DatasetModel
+
+        minimum = self.get_contributor_minimum()
+
+        # Same pool filter as compute_regional_aggregate, minus the
+        # crop/season scoping: the classifier's target IS the crop, so it
+        # needs every crop and season in the pool.
+        candidates: List[Dataset] = (
+            self.db.query(Dataset)
+            .filter(
+                Dataset.region_id.isnot(None),
+                Dataset.crop_id.isnot(None),
+                Dataset.season.isnot(None),
+                Dataset.yield_column.isnot(None),
+                Dataset.is_active.is_(True),
+                Dataset.is_deleted.is_(False),
+            )
+            .all()
+        )
+        pool = [ds for ds in candidates if self.is_contributing_dataset(ds)]
+
+        contributor_count = len(pool)
+        distinct_crops = {ds.crop_id for ds in pool}
+        if contributor_count < minimum or len(distinct_crops) < 2:
+            return {
+                "state": "not-enough-data",
+                "contributor_count": contributor_count,
+                "minimum": minimum,
+                "distinct_crops": len(distinct_crops),
+            }
+
+        frame = self._build_pooled_training_frame(pool)
+        if frame is None or len(frame) == 0:
+            return {
+                "state": "error",
+                "error_message": "No readable pooled rows — contributing files could not be parsed",
+                "contributor_count": contributor_count,
+                "minimum": minimum,
+            }
+
+        # Retrain replaces the previous classifier (drop MindsDB model +
+        # soft-delete the row) so the platform always serves one model.
+        previous = (
+            self.db.query(DatasetModel)
+            .filter(
+                DatasetModel.model_type == "classifier",
+                DatasetModel.dataset_id.is_(None),
+                DatasetModel.is_deleted.is_(False),
+            )
+            .all()
+        )
+        for old in previous:
+            try:
+                self.mindsdb.delete_model(old.mindsdb_model_name)
+            except Exception as e:  # noqa: BLE001 — best-effort cleanup
+                logger.warning(f"Could not drop previous classifier {old.mindsdb_model_name}: {e}")
+            old.soft_delete(user.id)
+        if previous:
+            self.db.commit()
+
+        ts = int(time.time())
+        mindsdb_model_name = f"agri_crop_classifier_{ts}"
+
+        model = DatasetModel(
+            dataset_id=None,  # pooled model belongs to no single dataset
+            name=mindsdb_model_name,
+            model_type="classifier",
+            mindsdb_model_name=mindsdb_model_name,
+            target_column=self.CROP_TARGET_COLUMN,
+            feature_columns=list(self.CLASSIFIER_FEATURES),
+            engine_type="mindsdb",
+            status="training",
+        )
+        self.db.add(model)
+        self.db.commit()
+        self.db.refresh(model)
+
+        uploaded = self._upload_pooled_frame(frame, mindsdb_model_name)
+        if uploaded is None:
+            model.status = "error"
+            model.error_message = "Failed to upload pooled training data to MindsDB"
+            self.db.commit()
+            self.db.refresh(model)
+            return {
+                "state": "error",
+                "model_id": model.id,
+                "error_message": model.error_message,
+                "contributor_count": contributor_count,
+                "minimum": minimum,
+            }
+
+        result = self.mindsdb.create_model(
+            mindsdb_model_name,
+            f"SELECT * FROM files.{uploaded}",
+            "files",
+            predict=self.CROP_TARGET_COLUMN,
+        )
+        if result.get("status") != "success":
+            model.status = "error"
+            model.error_message = str(result.get("error", "Unknown error"))[:2000]
+            self.db.commit()
+            self.db.refresh(model)
+            return {
+                "state": "error",
+                "model_id": model.id,
+                "error_message": model.error_message,
+                "contributor_count": contributor_count,
+                "minimum": minimum,
+            }
+
+        return {
+            "state": "training",
+            "model_id": model.id,
+            "contributor_count": contributor_count,
+            "minimum": minimum,
+            "distinct_crops": len(distinct_crops),
+        }
+
+    def get_crop_classifier(self) -> Optional["DatasetModel"]:
+        """The current pooled classifier row (training/complete/error), if any."""
+        from app.models.dataset import DatasetModel
+
+        return (
+            self.db.query(DatasetModel)
+            .filter(
+                DatasetModel.model_type == "classifier",
+                DatasetModel.dataset_id.is_(None),
+                DatasetModel.is_deleted.is_(False),
+            )
+            .order_by(DatasetModel.created_at.desc())
+            .first()
+        )
+
+    def crop_classifier_status(self) -> Dict[str, Any]:
+        """Status view of the pooled classifier for any authenticated member.
+
+        Refreshes the MindsDB status when the model is still training. The
+        response never exposes pooled rows or contributor identities.
+        """
+        model = self.get_crop_classifier()
+        if model is None:
+            return {"state": "none"}
+
+        if model.status == "training":
+            from app.services.model_training import ModelTrainingService
+
+            try:
+                model = ModelTrainingService(self.db, self.mindsdb).refresh_status(model)
+            except Exception as e:  # noqa: BLE001 — status view must not break
+                logger.warning(f"Crop classifier status refresh failed: {e}")
+
+        return {
+            "state": model.status,
+            "model_id": model.id,
+            "accuracy": model.accuracy,
+            "error_message": model.error_message,
+        }
+
+    def _build_pooled_training_frame(self, pool: List["Dataset"]):
+        """Concatenate pooled rows into one standardized DataFrame.
+
+        Each contributing file contributes ``region`` / ``season`` /
+        ``yield_value`` columns plus the ``crop`` target (reference names,
+        not ids — the model learns human-readable classes). Files that
+        cannot be read are skipped; a dataset whose Region or Crop no
+        longer resolves is skipped too, since its row would carry a
+        meaningless class label.
+        """
+        import pandas as pd
+
+        frames = []
+        for ds in pool:
+            # Defensive: the pool query guarantees all four tags, but a row
+            # missing region/crop would carry a meaningless class label.
+            if not ds.region_id or not ds.crop_id:
+                continue
+            frame = self._read_dataset_frame(ds)
+            if frame is None:
+                continue
+            region = self._find_region(ds.region_id)
+            crop = self._find_crop(ds.crop_id)
+            if region is None or crop is None:
+                continue
+            if ds.yield_column not in frame.columns:
+                continue
+
+            out = pd.DataFrame({
+                "region": region.name,
+                "season": ds.season,
+                "yield_value": frame[ds.yield_column],
+                self.CROP_TARGET_COLUMN: crop.name,
+            })
+            out = out[pd.notna(out["yield_value"])]
+            if len(out):
+                frames.append(out)
+
+        if not frames:
+            return None
+        return pd.concat(frames, ignore_index=True)
+
+    def _read_dataset_frame(self, ds: "Dataset"):
+        """Parse a contributing dataset's stored file into a DataFrame."""
+        if not ds.file_path or getattr(ds, "is_multi_file_dataset", False):
+            return None
+        ext = os.path.splitext(ds.file_path.lower())[1].lstrip(".")
+        if ext not in TABULAR_EXTENSIONS:
+            return None
+        full_path = os.path.join(self._resolve_storage_base(), ds.file_path)
+        try:
+            with open(full_path, "rb") as fh:
+                content = fh.read()
+        except OSError as e:
+            logger.warning(f"Could not read pooled file {ds.file_path}: {e}")
+            return None
+        return _read_tabular_frame(content, ext)
+
+    def _upload_pooled_frame(self, frame, model_name: str) -> Optional[str]:
+        """Write the pooled frame to a temp CSV and upload it to MindsDB files."""
+        import tempfile
+
+        upload_name = f"{model_name}.csv"
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".csv", delete=False, newline=""
+            ) as tmp:
+                tmp_path = tmp.name
+                frame.to_csv(tmp, index=False)
+            return self.mindsdb.upload_file_to_mindsdb(tmp_path, upload_name)
+        except Exception as e:  # noqa: BLE001 — surfaced via the model row
+            logger.warning(f"Pooled frame upload failed: {e}")
+            return None
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+    def _resolve_storage_base(self) -> str:
+        """Local storage base for dataset files (mirrors ModelTrainingService)."""
+        try:
+            from app.services.storage import StorageService
+
+            storage_service = StorageService()
+            if (
+                hasattr(storage_service, "backend")
+                and hasattr(storage_service.backend, "storage_dir")
+            ):
+                return storage_service.backend.storage_dir
+        except Exception:
+            pass
+        from app.core.config import settings
+
+        return os.path.abspath(settings.DATASET_STORAGE_PATH)
 
     # ── Internals ─────────────────────────────────────────────────────
 

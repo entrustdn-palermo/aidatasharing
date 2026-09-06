@@ -604,7 +604,69 @@ export const mindsdbAPI = {
   },
 };;
 
-// Models API;
+// Models API
+export interface DatasetModelInfo {
+  id: number;
+  dataset_id: number;
+  name: string;
+  model_type: string;
+  mindsdb_model_name: string;
+  target_column: string | null;
+  feature_columns: string[] | null;
+  engine_type: string | null;
+  status: string;
+  accuracy: string | null;
+  training_time: number | null;
+  prediction_count: number;
+  error_message: string | null;
+  is_active: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ModelStatusInfo {
+  id: number;
+  status: string;
+  accuracy: string | null;
+  training_time: number | null;
+  error_message: string | null;
+  last_updated: string | null;
+}
+
+export const modelsAPI = {
+  listModels: async (): Promise<DatasetModelInfo[]> => {
+    const response = await apiClient.get('/api/models');
+    return response.data;
+  },
+
+  trainModel: async (params: {
+    dataset_id: number;
+    target_column: string;
+    name?: string;
+  }): Promise<DatasetModelInfo> => {
+    const response = await apiClient.post('/api/models', params);
+    return response.data;
+  },
+
+  getModel: async (modelId: number): Promise<DatasetModelInfo> => {
+    const response = await apiClient.get(`/api/models/${modelId}`);
+    return response.data;
+  },
+
+  getModelStatus: async (modelId: number): Promise<ModelStatusInfo> => {
+    const response = await apiClient.get(`/api/models/${modelId}/status`);
+    return response.data;
+  },
+
+  predict: async (modelId: number, input: Record<string, any>): Promise<{ id: number; predictions: Record<string, any>[] }> => {
+    const response = await apiClient.post(`/api/models/${modelId}/predict`, { input });
+    return response.data;
+  },
+
+  deleteModel: async (modelId: number): Promise<void> => {
+    await apiClient.delete(`/api/models/${modelId}`);
+  },
+};
 
 // Data Access API
 export const dataAccessAPI = {
@@ -813,6 +875,16 @@ export interface RegionalAggregate {
   season: string;
 }
 
+export interface RegionSuggestion {
+  region_id: number;
+  region_name: string;
+}
+
+export interface RegionSuggestionResult {
+  suggestion: RegionSuggestion | null;
+  region_column: string | null;
+}
+
 export const agriAPI = {
   listRegions: async (): Promise<AgriRegion[]> => {
     const response = await apiClient.get('/api/agri/regions');
@@ -834,6 +906,16 @@ export const agriAPI = {
     return response.data;
   },
 
+  // Pre-suggest a region from a recognizable region-like column (wizard step 3).
+  suggestRegionForFile: async (file: File): Promise<RegionSuggestionResult> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await apiClient.post('/api/agri/suggest-region/file', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  },
+
   regionalAggregate: async (params: {
     region_id: number;
     crop_id: number;
@@ -842,6 +924,18 @@ export const agriAPI = {
     const response = await apiClient.get('/api/agri/regional-aggregate', { params });
     return response.data;
   },
+
+  cropClassifierStatus: async (): Promise<CropClassifierStatus> => {
+    const response = await apiClient.get('/api/agri/crop-classifier');
+    return response.data;
+  },
 };
+
+export interface CropClassifierStatus {
+  state: string; // "none" | "training" | "complete" | "error"
+  model_id: number | null;
+  accuracy: string | null;
+  error_message: string | null;
+}
 
 export default apiClient;

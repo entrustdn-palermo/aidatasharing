@@ -976,21 +976,18 @@ class MindsDBService:
             if not uploaded_name:
                 return {"success": False, "error": "Failed to upload file to MindsDB"}
 
-            # Create model
-            model_name = self.create_model_for_uploaded_file(uploaded_name, file_type)
-            if not model_name:
-                return {"success": False, "error": "Failed to create MindsDB model"}
-
-            # Update dataset
-            dataset.mindsdb_table_name = model_name
-            dataset.mindsdb_database = "mindsdb"
+            # File is now available in MindsDB as files.<uploaded_name>.
+            # Model training is user-initiated via POST /api/models — no
+            # automatic model creation here.
+            dataset.mindsdb_table_name = uploaded_name
+            dataset.mindsdb_database = "files"
             dataset.ai_processing_status = "ready"
 
             # Update chat context
             if hasattr(dataset, 'chat_context') and dataset.chat_context:
                 dataset.chat_context['mindsdb_datasource'] = uploaded_name
                 dataset.chat_context['mindsdb_available'] = True
-                dataset.chat_context['model_name'] = model_name
+                dataset.chat_context['model_name'] = uploaded_name
                 dataset.chat_context['file_type'] = file_type
 
             db_session.commit()
@@ -1239,6 +1236,117 @@ class MindsDBService:
             logger.error(f"Failed to process file content: {e}")
             result["error"] = str(e)
             return result
+
+    # ============================================================
+    # MODEL TRAINING — CREATE MODEL / predict / status / delete
+    # ============================================================
+    #
+    # These methods generate MindsDB SQL and execute it through
+    # self.execute_query() so that all connection and error handling
+    # is reused.  Identifiers are validated via
+    # is_safe_mindsdb_identifier() — unsafe ones raise ValueError.
+    #
+    # The method names match the call sites in app/api/mindsdb.py,
+    # making those routes functional as a side effect.
+
+    def get_models(self) -> List[Dict[str, Any]]:
+        """List all models from MindsDB via SELECT * FROM mindsdb.models."""
+        result = self.execute_query("SELECT * FROM mindsdb.models")
+        if result.get("status") == "error":
+            logger.warning(f"Failed to fetch models: {result.get('error')}")
+            return []
+        return result.get("rows", [])
+
+    def create_model(
+        self,
+        model_name: str,
+        query: str,
+        engine: str = "mindsdb",
+        predict: Optional[str] = None,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create a model via async CREATE MODEL SQL.
+
+        Returns the raw execute_query result dict (status, rows, etc.).
+        The model starts in 'training' status — call get_model_info()
+        to poll for completion.
+        """
+        # Validate identifiers
+        if not self.is_safe_mindsdb_identifier(model_name):
+            raise ValueError(f"Unsafe model name: {model_name}")
+        if predict is not None and not self.is_safe_mindsdb_identifier(predict):
+            raise ValueError(f"Unsafe predict column: {predict}")
+
+        sql = f"CREATE MODEL mindsdb.{model_name}\n"
+        sql += f"FROM {engine} ({query})\n"
+        if predict:
+            sql += f"PREDICT `{predict}`\n"
+        if options:
+            opts = ", ".join(f"{k} = {v}" for k, v in options.items())
+            sql += f"WITH ({opts})\n"
+
+        logger.info(f"🔍 Creating model: {model_name}")
+        return self.execute_query(sql.strip())
+
+    def get_model_info(self, model_name: str) -> Optional[Dict[str, Any]]:
+        """Get a single model's info by name, or None if not found.
+
+        Runs SELECT * FROM mindsdb.models WHERE name = '<model_name>'.
+        """
+        if not self.is_safe_mindsdb_identifier(model_name):
+            raise ValueError(f"Unsafe model name: {model_name}")
+
+        sql = f"SELECT * FROM mindsdb.models WHERE name = '{model_name}'"
+        result = self.execute_query(sql)
+        rows = result.get("rows", [])
+        return rows[0] if rows else None
+
+    def predict(
+        self, model_name: str, prediction_data: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Run a prediction using the named model.
+
+        *prediction_data* maps column names to values; each becomes a
+        WHERE clause term (AND-joined).  Returns a list of result-row
+        dicts.
+        """
+        if not self.is_safe_mindsdb_identifier(model_name):
+            raise ValueError(f"Unsafe model name: {model_name}")
+
+        clauses = [
+            f"{col} = {self._format_sql_literal(val)}"
+            for col, val in prediction_data.items()
+        ]
+        where = " AND ".join(clauses)
+        sql = f"SELECT * FROM mindsdb.{model_name} WHERE {where}"
+        result = self.execute_query(sql)
+        return result.get("rows", [])
+
+    def delete_model(self, model_name: str) -> bool:
+        """DROP MODEL IF EXISTS — returns True on success."""
+        if not self.is_safe_mindsdb_identifier(model_name):
+            raise ValueError(f"Unsafe model name: {model_name}")
+
+        sql = f"DROP MODEL IF EXISTS mindsdb.{model_name}"
+        result = self.execute_query(sql)
+        return result.get("status") == "success"
+
+    @staticmethod
+    def _format_sql_literal(value: Any) -> str:
+        """Format a Python value as a SQL literal.
+
+        Handles None → NULL, bool → True/False, int/float → str,
+        str → single-quoted with '' escaping.
+        """
+        if value is None:
+            return "NULL"
+        if isinstance(value, bool):
+            return "True" if value else "False"
+        if isinstance(value, (int, float)):
+            return str(value)
+        # string: escape single quotes by doubling them
+        escaped = str(value).replace("'", "''")
+        return f"'{escaped}'"
 
     # ============================================================
     # AGENT-BASED ARCHITECTURE METHODS — delegated to sub-services

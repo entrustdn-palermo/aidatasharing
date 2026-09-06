@@ -13,7 +13,6 @@ from app.models.user import User
 from app.models.dataset import Dataset
 from app.models.organization import Organization
 from app.models.data_connector import DataConnector
-from app.models.data_sharing import SharedDataset
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +74,7 @@ class PermissionService:
                 return True
 
             # Owner has full access
-            if dataset.user_id == user.id:
+            if dataset.owner_id == user.id:
                 logger.debug(f"Owner {user.email} granted access to dataset {dataset_id}")
                 return True
 
@@ -135,7 +134,7 @@ class PermissionService:
         Returns:
             True if user owns dataset
         """
-        return user.is_superuser or dataset.user_id == user.id
+        return user.is_superuser or dataset.owner_id == user.id
 
     def require_dataset_ownership(self, dataset: Dataset, user: User):
         """
@@ -189,7 +188,7 @@ class PermissionService:
                 return True
 
             # Owner has full access
-            if connector.user_id == user.id:
+            if connector.created_by == user.id:
                 return True
 
             # Check organization access
@@ -343,29 +342,17 @@ class PermissionService:
             True if access is granted
         """
         try:
-            shared = self.db.query(SharedDataset).filter(
-                SharedDataset.share_token == share_token
+            # Sharing lives on the Dataset itself: a share link is a dataset
+            # with share_token set and public_share_enabled turned on.
+            dataset = self.db.query(Dataset).filter(
+                Dataset.share_token == share_token,
+                Dataset.public_share_enabled == True,
+                Dataset.is_deleted == False,
+                Dataset.is_active == True,
             ).first()
 
-            if not shared:
+            if not dataset:
                 logger.warning(f"Shared data with token {share_token} not found")
-                return False
-
-            # Check if share is active
-            if not shared.is_active:
-                logger.warning(f"Shared data {share_token} is inactive")
-                return False
-
-            # Check expiration
-            if shared.expires_at:
-                from datetime import datetime
-                if datetime.utcnow() > shared.expires_at:
-                    logger.warning(f"Shared data {share_token} has expired")
-                    return False
-
-            # If requires auth and no user, deny
-            if shared.requires_authentication and not user:
-                logger.warning(f"Shared data {share_token} requires authentication")
                 return False
 
             return True
@@ -469,17 +456,17 @@ class PermissionService:
             True if user has shared access
         """
         try:
-            # Check if dataset is shared with user via SharedDataset table
-            shared = self.db.query(SharedDataset).filter(
-                SharedDataset.dataset_id == dataset_id,
-                SharedDataset.is_active == True
+            # A dataset is "shared" when its public share link is enabled
+            # (Dataset.public_share_enabled + share_token) — there is no
+            # separate share-grant table.
+            dataset = self.db.query(Dataset).filter(
+                Dataset.id == dataset_id
             ).first()
 
-            if not shared:
+            if not dataset:
                 return False
 
-            # If requires authentication, user must be logged in
-            if shared.requires_authentication and not user:
+            if not dataset.public_share_enabled or dataset.is_deleted or not dataset.is_active:
                 return False
 
             # For now, shared datasets are read-only

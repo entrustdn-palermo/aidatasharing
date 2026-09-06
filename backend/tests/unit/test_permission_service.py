@@ -11,7 +11,7 @@ Tests cover:
 """
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, MagicMock, AsyncMock, patch
 from datetime import datetime
 from fastapi import HTTPException, status
 
@@ -71,7 +71,7 @@ class TestPermissionServiceDatasetAccess:
         return Dataset(
             id=100,
             name="Test Dataset",
-            user_id=2,
+            owner_id=2,
             organization_id=1,
         )
 
@@ -113,7 +113,7 @@ class TestPermissionServiceDatasetAccess:
             organization_id=1,  # Same as dataset
         )
 
-        with patch.object(service, '_check_org_permission', return_value=True):
+        with patch.object(service, '_check_org_permission', new=AsyncMock(return_value=True)):
             has_access = await service.check_dataset_access(
                 dataset_id=100,
                 user=same_org_user,
@@ -191,15 +191,16 @@ class TestPermissionServiceDatasetAccess:
 
     @pytest.mark.asyncio
     async def test_check_dataset_access_with_none_user(self, service, db_session, dataset):
-        """Test that None user is handled"""
+        """A None user is handled fail-closed: access denied, no crash."""
         db_session.query().filter().first.return_value = dataset
 
-        with pytest.raises((AttributeError, TypeError)):
-            await service.check_dataset_access(
-                dataset_id=100,
-                user=None,
-                required_level=AccessLevel.READ
-            )
+        has_access = await service.check_dataset_access(
+            dataset_id=100,
+            user=None,
+            required_level=AccessLevel.READ
+        )
+
+        assert has_access is False
 
 
 class TestPermissionServiceOrganizationAccess:
@@ -287,7 +288,7 @@ class TestPermissionServiceSharedDataset:
         return Dataset(
             id=100,
             name="Public Dataset",
-            user_id=1,
+            owner_id=1,
             organization_id=1,
             sharing_level="public",
         )
@@ -298,7 +299,7 @@ class TestPermissionServiceSharedDataset:
         return Dataset(
             id=101,
             name="Org Dataset",
-            user_id=1,
+            owner_id=1,
             organization_id=1,
             sharing_level="organization",
         )
@@ -309,7 +310,7 @@ class TestPermissionServiceSharedDataset:
         return Dataset(
             id=102,
             name="Private Dataset",
-            user_id=1,
+            owner_id=1,
             organization_id=1,
             sharing_level="private",
         )
@@ -350,7 +351,7 @@ class TestPermissionServiceSharedDataset:
             organization_id=1,  # Same organization
         )
 
-        with patch.object(service, '_check_org_permission', return_value=True):
+        with patch.object(service, '_check_org_permission', new=AsyncMock(return_value=True)):
             has_access = await service.check_dataset_access(
                 dataset_id=101,
                 user=org_member,
@@ -385,6 +386,16 @@ class TestPermissionServiceSharedDataset:
 class TestPermissionServiceAccessLevels:
     """Test suite for access level enumeration and validation"""
 
+    @pytest.fixture
+    def db_session(self):
+        """Mock database session"""
+        return Mock()
+
+    @pytest.fixture
+    def service(self, db_session):
+        """Create PermissionService instance"""
+        return PermissionService(db_session)
+
     def test_access_level_enum_values(self):
         """Test AccessLevel enum has expected values"""
         assert AccessLevel.READ is not None
@@ -392,11 +403,22 @@ class TestPermissionServiceAccessLevels:
         assert AccessLevel.ADMIN is not None
 
     def test_access_level_ordering(self):
-        """Test AccessLevel enum ordering"""
-        # Assuming READ < WRITE < ADMIN
-        # Implementation may vary
-        assert AccessLevel.READ.value < AccessLevel.WRITE.value
-        assert AccessLevel.WRITE.value < AccessLevel.ADMIN.value
+        """Access levels are distinct; the hierarchy is enforced through the
+        role map in _check_org_permission, not enum value ordering."""
+        assert len({AccessLevel.READ, AccessLevel.WRITE, AccessLevel.ADMIN}) == 3
+
+    @pytest.mark.asyncio
+    async def test_access_level_hierarchy_through_roles(self, service):
+        """Admin role clears every level; member role clears only READ."""
+        admin = User(id=1, email="a@o.com", is_superuser=False, organization_id=1, role="admin")
+        member = User(id=2, email="m@o.com", is_superuser=False, organization_id=1, role="member")
+
+        for level in [AccessLevel.READ, AccessLevel.WRITE, AccessLevel.DELETE, AccessLevel.ADMIN]:
+            assert await service._check_org_permission(admin, level) is True
+
+        assert await service._check_org_permission(member, AccessLevel.READ) is True
+        assert await service._check_org_permission(member, AccessLevel.WRITE) is False
+        assert await service._check_org_permission(member, AccessLevel.ADMIN) is False
 
 
 class TestPermissionServiceErrorHandling:
@@ -414,17 +436,18 @@ class TestPermissionServiceErrorHandling:
 
     @pytest.mark.asyncio
     async def test_database_error_handling(self, service, db_session):
-        """Test handling of database errors"""
+        """Database errors are handled fail-closed: access denied, no crash."""
         db_session.query().filter().first.side_effect = Exception("Database error")
 
         user = User(id=1, email="test@example.com", is_superuser=False)
 
-        with pytest.raises(Exception):
-            await service.check_dataset_access(
-                dataset_id=100,
-                user=user,
-                required_level=AccessLevel.READ
-            )
+        has_access = await service.check_dataset_access(
+            dataset_id=100,
+            user=user,
+            required_level=AccessLevel.READ
+        )
+
+        assert has_access is False
 
     @pytest.mark.asyncio
     async def test_invalid_dataset_id(self, service, db_session):
@@ -443,19 +466,20 @@ class TestPermissionServiceErrorHandling:
 
     @pytest.mark.asyncio
     async def test_invalid_access_level(self, service, db_session):
-        """Test handling of invalid access level"""
-        dataset = Dataset(id=100, name="Test", user_id=1, organization_id=1)
+        """An invalid access level is handled fail-closed: access denied."""
+        dataset = Dataset(id=100, name="Test", owner_id=1, organization_id=1)
         db_session.query().filter().first.return_value = dataset
 
-        user = User(id=1, email="test@example.com", is_superuser=False)
+        # Non-owner so the invalid level actually reaches the role lookup
+        user = User(id=2, email="test@example.com", is_superuser=False, organization_id=1)
 
-        # Passing invalid enum value should raise error
-        with pytest.raises((TypeError, AttributeError)):
-            await service.check_dataset_access(
-                dataset_id=100,
-                user=user,
-                required_level="invalid_level"
-            )
+        has_access = await service.check_dataset_access(
+            dataset_id=100,
+            user=user,
+            required_level="invalid_level"
+        )
+
+        assert has_access is False
 
 
 class TestPermissionServiceCaching:
@@ -474,7 +498,7 @@ class TestPermissionServiceCaching:
     @pytest.mark.asyncio
     async def test_repeated_checks_use_cache(self, service, db_session):
         """Test that repeated permission checks use caching"""
-        dataset = Dataset(id=100, name="Test", user_id=1, organization_id=1)
+        dataset = Dataset(id=100, name="Test", owner_id=1, organization_id=1)
         db_session.query().filter().first.return_value = dataset
 
         user = User(id=1, email="test@example.com", is_superuser=False)
@@ -512,7 +536,7 @@ class TestPermissionServiceIntegration:
         dataset = Dataset(
             id=100,
             name="Test Dataset",
-            user_id=1,
+            owner_id=1,
             organization_id=1,
             sharing_level="organization",
         )
@@ -535,9 +559,9 @@ class TestPermissionServiceIntegration:
     async def test_permission_checks_for_batch_operations(self, service, db_session):
         """Test permission checks for batch operations"""
         datasets = [
-            Dataset(id=100, name="DS1", user_id=1, organization_id=1),
-            Dataset(id=101, name="DS2", user_id=1, organization_id=1),
-            Dataset(id=102, name="DS3", user_id=2, organization_id=2),
+            Dataset(id=100, name="DS1", owner_id=1, organization_id=1),
+            Dataset(id=101, name="DS2", owner_id=1, organization_id=1),
+            Dataset(id=102, name="DS3", owner_id=2, organization_id=2),
         ]
 
         user = User(id=1, email="user@example.com", is_superuser=False, organization_id=1)

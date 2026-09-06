@@ -24,6 +24,7 @@ from .admin_config import (
     ConfigurationOverride, MindsDBConfiguration, ConfigurationHistory
 )
 from .agri import Region, Crop
+from .data_connector import DataConnector
 
 __all__ = [
     # SQLAlchemy base
@@ -60,5 +61,8 @@ __all__ = [
     "ConfigurationOverride", "MindsDBConfiguration", "ConfigurationHistory",
 
     # Agricultural reference models
-    "Region", "Crop"
+    "Region", "Crop",
+
+    # Compatibility alias
+    "DataConnector",
 ]

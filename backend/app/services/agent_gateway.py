@@ -154,6 +154,41 @@ class AgentGateway(Protocol):
         """Extract content and metadata from a file (pdf/json) for preview."""
         ...
 
+    # ── Model training ────────────────────────────────────────────────
+
+    def get_models(self) -> List[Dict[str, Any]]:
+        """List all models from MindsDB (SELECT * FROM mindsdb.models)."""
+        ...
+
+    def create_model(
+        self,
+        model_name: str,
+        query: str,
+        engine: str = "mindsdb",
+        predict: Optional[str] = None,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create a model (async CREATE MODEL) via MindsDB SQL."""
+        ...
+
+    def get_model_info(self, model_name: str) -> Optional[Dict[str, Any]]:
+        """Get a single model's info by name, or None if not found."""
+        ...
+
+    def predict(
+        self, model_name: str, prediction_data: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Run a prediction using the named model.
+
+        *prediction_data* maps column names to values; each becomes a
+        WHERE clause term.  Returns a list of result-row dicts.
+        """
+        ...
+
+    def delete_model(self, model_name: str) -> bool:
+        """DROP MODEL IF EXISTS — returns True on success."""
+        ...
+
     # ── Deprecated backward-compat aliases (will be removed) ─────────
 
     def _is_safe_mindsdb_identifier(self, identifier: Optional[str]) -> bool:

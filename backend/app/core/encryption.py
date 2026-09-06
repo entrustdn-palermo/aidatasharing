@@ -9,8 +9,7 @@ import logging
 from typing import Optional, Union
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2
-from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from app.core.config import settings
 
@@ -59,12 +58,11 @@ class EncryptionService:
         # Use a fixed salt (in production, store this securely)
         salt = b'aishare_platform_salt_v1'
 
-        kdf = PBKDF2(
+        kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,
             salt=salt,
             iterations=100000,
-            backend=default_backend()
         )
 
         key = base64.urlsafe_b64encode(kdf.derive(secret))

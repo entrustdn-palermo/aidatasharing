@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app.core.database import SessionLocal
 from app.core.encryption import get_encryption_service, is_encrypted
 from app.models.data_connector import DataConnector
-from app.models.llm_configuration import LLMConfiguration
+from app.models.dataset import LLMConfiguration
 
 # Setup logging
 logging.basicConfig(
@@ -36,10 +36,10 @@ logger = logging.getLogger(__name__)
 class CredentialMigration:
     """Handles migration of credentials to encrypted format"""
 
-    def __init__(self, db: Session, dry_run: bool = False):
+    def __init__(self, db: Session, dry_run: bool = False, encryption_service=None):
         self.db = db
         self.dry_run = dry_run
-        self.encryption_service = get_encryption_service()
+        self.encryption_service = encryption_service or get_encryption_service()
         self.stats = {
             'connectors_processed': 0,
             'connectors_encrypted': 0,

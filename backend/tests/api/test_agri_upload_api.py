@@ -26,6 +26,7 @@ from app.core.auth import get_current_user, get_current_admin_user
 from app.core.database import get_db
 from app.models import Base
 from app.models.agri import Region, Crop
+from app.models.dataset import DatasetModel
 from app.models.user import User
 from app.api import agri, datasets
 
@@ -375,5 +376,161 @@ class TestSuggestEndpoint:
         assert resp.status_code in (401, 403)
 
 
+# ── Region pre-suggestion endpoint (Story 9) ──────────────────────────
+
+REGION_CSV = (
+    b"plot,wilayah,produksi\n"
+    b"1,Jawa Barat,5.2\n"
+    b"2,jawa barat,4.8\n"
+)
+
+
+class TestSuggestRegionEndpoint:
+    def test_suggests_region_from_file(self, client, references):
+        resp = client.post(
+            "/api/agri/suggest-region/file",
+            files={"file": ("farm.csv", io.BytesIO(REGION_CSV), "text/csv")},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["region_column"] == "wilayah"
+        assert body["suggestion"] == {
+            "region_id": references["region"].id,
+            "region_name": "Jawa Barat",
+        }
+
+    def test_no_region_column_returns_null_suggestion(self, client, references):
+        resp = client.post(
+            "/api/agri/suggest-region/file",
+            files={"file": ("farm.csv", io.BytesIO(CSV_BYTES), "text/csv")},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["suggestion"] is None
+        assert body["region_column"] is None
+
+    def test_deactivated_region_not_suggested(self, client, references):
+        """Only the active reference list is matched — a file tagged with a
+        deactivated region gets no suggestion (the user picks explicitly)."""
+        csv_bytes = b"wilayah,produksi\nLama Sekali,5.2\n"
+        resp = client.post(
+            "/api/agri/suggest-region/file",
+            files={"file": ("farm.csv", io.BytesIO(csv_bytes), "text/csv")},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["suggestion"] is None
+
+    def test_requires_auth(self, app):
+        app.dependency_overrides.pop(get_current_user, None)
+        client = TestClient(app)
+        resp = client.post(
+            "/api/agri/suggest-region/file",
+            files={"file": ("farm.csv", io.BytesIO(REGION_CSV), "text/csv")},
+        )
+        assert resp.status_code in (401, 403)
+
+
 def client_of(app):
     return TestClient(app)
+
+
+# ── Pooled crop classifier (Stories 19/24) ────────────────────────────
+
+class TestCropClassifierEndpoints:
+    def test_train_requires_admin(self, client):
+        """A member may read classifier status but not trigger training.
+
+        (This codebase's admin gate answers 400 for a non-admin member.)
+        """
+        resp = client.post("/api/agri/crop-classifier/train")
+        assert resp.status_code in (400, 401, 403)
+
+    def test_train_not_enough_data_shape(self, admin_client):
+        """Empty pool → not-enough-data with counts, never rows/identities."""
+        resp = admin_client.post("/api/agri/crop-classifier/train")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["state"] == "not-enough-data"
+        assert body["contributor_count"] == 0
+        assert body["minimum"] == 5
+        assert set(body.keys()) <= {
+            "state", "model_id", "contributor_count", "minimum",
+            "distinct_crops", "error_message",
+        }
+
+    def test_status_none_before_training(self, client):
+        resp = client.get("/api/agri/crop-classifier")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"state": "none", "model_id": None,
+                               "accuracy": None, "error_message": None}
+
+    def test_status_requires_auth(self, app):
+        app.dependency_overrides.pop(get_current_user, None)
+        resp = TestClient(app).get("/api/agri/crop-classifier")
+        assert resp.status_code in (401, 403)
+
+    def test_train_trains_when_pool_qualifies(self, admin_client, db, references):
+        """Qualified pool → endpoint delegates to the service and reports
+        training. MindsDB stays out via the gateway seam."""
+        from unittest.mock import Mock
+        import pandas as pd
+        from app.models.dataset import Dataset, DatasetType
+        from app.services.agri_data import AgriDataService
+
+        crop2 = Crop(name="Jagung", is_active=True)
+        db.add(crop2)
+        db.commit()
+
+        for i in range(5):
+            db.add(Dataset(
+                name=f"pool-{i}", type=DatasetType.CSV,
+                file_path=f"/s/p{i}.csv", size_bytes=100,
+                owner_id=1, organization_id=10 + i,
+                is_active=True, is_deleted=False,
+                region_id=references["region"].id,
+                crop_id=references["crop"].id if i % 2 else crop2.id,
+                season="2026A", yield_column="produksi",
+                column_statistics={"produksi": {"mean": 5.0}},
+            ))
+        db.commit()
+
+        gateway = Mock()
+        gateway.upload_file_to_mindsdb.return_value = "agri_crop_classifier_1.csv"
+        gateway.create_model.return_value = {"status": "success"}
+        gateway.delete_model.return_value = True
+
+        pooled_frame = pd.DataFrame({
+            "region": ["Jawa Barat"] * 3,
+            "season": ["2026A"] * 3,
+            "yield_value": [5.0, 4.8, 5.2],
+            "crop": ["Padi", "Padi", "Jagung"],
+        })
+        with patch.object(AgriDataService, "mindsdb",
+                          new_callable=lambda: property(lambda self: gateway)), \
+             patch.object(AgriDataService, "_build_pooled_training_frame",
+                          return_value=pooled_frame):
+            resp = admin_client.post("/api/agri/crop-classifier/train")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["state"] == "training", body
+        assert body["model_id"] is not None
+        assert body["contributor_count"] == 5
+        assert body["distinct_crops"] == 2
+
+        # The classifier row is persisted as a pooled model (no dataset).
+        model = db.query(DatasetModel).filter(
+            DatasetModel.id == body["model_id"]).first()
+        assert model is not None
+        assert model.dataset_id is None
+        assert model.model_type == "classifier"
+        assert model.status == "training"
+
+        # Status endpoint reads the same row — refresh_status is the seam
+        # that would otherwise reach live MindsDB.
+        with patch("app.services.model_training.ModelTrainingService.refresh_status",
+                   side_effect=lambda m: m):
+            status_resp = admin_client.get("/api/agri/crop-classifier")
+        assert status_resp.status_code == 200
+        assert status_resp.json()["state"] == "training"
+        assert status_resp.json()["model_id"] == body["model_id"]

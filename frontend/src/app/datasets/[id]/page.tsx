@@ -6,6 +6,7 @@ import { useAuth } from '@/components/auth/AuthProvider';
 import { useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import { datasetsAPI, dataSharingAPI, organizationsAPI } from '@/lib/api';
+import { DatasetModelsCard } from '@/components/datasets/DatasetModelsCard';
 import { API_BASE_URL } from '@/lib/api/client';
 import Link from 'next/link';
 import {
@@ -22,7 +23,9 @@ import {
   UserCheck,
   Upload,
   Edit,
-  FileText
+  FileText,
+  Brain,
+  Sprout,
 } from 'lucide-react';
 
 function formatFileSize(bytes: number): string {
@@ -1317,6 +1320,49 @@ function DatasetDetailContent() {
                 )}
               </div>
             </div>
+
+            {/* Agricultural Tags — region/crop/season/yield from the upload wizard */}
+            {dataset.agri_tags && (
+              <div className="bg-white shadow rounded-lg p-6">
+                <div className="flex items-center mb-4">
+                  <Sprout className="w-5 h-5 text-green-600 mr-2" />
+                  <h3 className="text-lg font-medium text-gray-900">Agricultural Tags</h3>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div>
+                    <span className="text-sm font-medium text-gray-500">Region</span>
+                    <p className="mt-1 text-sm text-gray-900">
+                      {dataset.agri_tags.region_name || (dataset.agri_tags.region_id ? `Region #${dataset.agri_tags.region_id}` : '—')}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-sm font-medium text-gray-500">Crop</span>
+                    <p className="mt-1 text-sm text-gray-900">
+                      {dataset.agri_tags.crop_name || (dataset.agri_tags.crop_id ? `Crop #${dataset.agri_tags.crop_id}` : '—')}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-sm font-medium text-gray-500">Season</span>
+                    <p className="mt-1 text-sm text-gray-900">{dataset.agri_tags.season || '—'}</p>
+                  </div>
+                  <div>
+                    <span className="text-sm font-medium text-gray-500">Yield Column</span>
+                    <p className="mt-1 text-sm text-gray-900">
+                      {dataset.agri_tags.yield_column ? (
+                        <code className="px-1.5 py-0.5 bg-gray-100 rounded text-xs">{dataset.agri_tags.yield_column}</code>
+                      ) : '—'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* AI Models Card */}
+            <DatasetModelsCard
+              datasetId={datasetId}
+              columnStatistics={dataset.column_statistics || null}
+              isOwner={isOwner}
+            />
           </div>
 
           {/* Sidebar */}
@@ -1478,16 +1524,16 @@ function DatasetDetailContent() {
                   </>
                 )}
 
-                <Link
-                  href={`/models/create?dataset_id=${datasetId}`}
-                  className="flex items-center p-3 border border-gray-200 rounded-lg hover:bg-gray-50"
+                <button
+                  onClick={() => document.getElementById('ai-models')?.scrollIntoView({ behavior: 'smooth' })}
+                  className="w-full flex items-center p-3 border border-gray-200 rounded-lg hover:bg-gray-50"
                 >
-                  <Database className="w-5 h-5 text-indigo-600 mr-3" />
-                  <div>
+                  <Brain className="w-5 h-5 text-indigo-600 mr-3" />
+                  <div className="text-left">
                     <p className="text-sm font-medium text-gray-900">Create AI Model</p>
-                    <p className="text-xs text-gray-500">Build ML models from this data</p>
+                    <p className="text-xs text-gray-500">Train ML models from this data</p>
                   </div>
-                </Link>
+                </button>
               </div>
             </div>
           </div>

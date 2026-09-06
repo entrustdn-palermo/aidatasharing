@@ -8,7 +8,9 @@ import {
   datasetsAPI,
   type AgriCrop,
   type AgriRegion,
+  type CropClassifierStatus,
   type RegionalAggregate,
+  type RegionSuggestion,
 } from '@/lib/api';
 import {
   AlertCircle,
@@ -53,6 +55,7 @@ interface UploadResult {
   datasetId: number;
   yourYieldMean: number | null;
   aggregate: RegionalAggregate;
+  classifier: CropClassifierStatus | null;
 }
 
 const STEP_LABELS = ['Upload', 'Yield Column', 'Region & Crop', 'Review', 'Results'];
@@ -82,6 +85,12 @@ function FarmerWizardContent() {
     cropId: null,
     season: '',
   });
+  // Story 9: region pre-suggestion from a recognizable region-like column.
+  // The file it was computed for, so back/forward doesn't re-fetch or re-apply.
+  const [regionSuggestion, setRegionSuggestion] = useState<{
+    sourceFile: File;
+    suggestion: RegionSuggestion | null;
+  } | null>(null);
   const [result, setResult] = useState<UploadResult | null>(null);
 
   const [error, setError] = useState<string | null>(null);
@@ -93,6 +102,7 @@ function FarmerWizardContent() {
     setFileChoice(null);
     setYieldChoice(null);
     setTagChoice({ regionId: null, cropId: null, season: '' });
+    setRegionSuggestion(null);
     setResult(null);
     setError(null);
     wizard.reset();
@@ -114,7 +124,11 @@ function FarmerWizardContent() {
     setBusy(true);
     setError(null);
     try {
-      const suggestion = await agriAPI.suggestYieldColumnForFile(fileChoice.file);
+      // The region suggestion is a convenience — never block the wizard on it.
+      const [suggestion, regionResult] = await Promise.all([
+        agriAPI.suggestYieldColumnForFile(fileChoice.file),
+        agriAPI.suggestRegionForFile(fileChoice.file).catch(() => null),
+      ]);
       if (suggestion.numeric_columns.length === 0) {
         setError(
           'No numeric columns found in this file. A yield column must be numeric — check the file and try again.',
@@ -126,6 +140,10 @@ function FarmerWizardContent() {
         numericColumns: suggestion.numeric_columns,
         suggestion: suggestion.suggestion,
         selected: suggestion.suggestion ?? suggestion.numeric_columns[0],
+      });
+      setRegionSuggestion({
+        sourceFile: fileChoice.file,
+        suggestion: regionResult?.suggestion ?? null,
       });
       wizard.next();
     } catch (err: any) {
@@ -190,7 +208,13 @@ function FarmerWizardContent() {
         crop_id: tagChoice.cropId as number,
         season: tagChoice.season.trim(),
       });
-      setResult({ datasetId: dataset.id, yourYieldMean, aggregate });
+      let classifier: CropClassifierStatus | null = null;
+      try {
+        classifier = await agriAPI.cropClassifierStatus();
+      } catch {
+        // classifier is a bonus; never block the results step
+      }
+      setResult({ datasetId: dataset.id, yourYieldMean, aggregate, classifier });
       wizard.next();
     } catch (err: any) {
       setError(
@@ -201,6 +225,22 @@ function FarmerWizardContent() {
       setBusy(false);
     }
   }, [fileChoice, yieldChoice, tagChoice, wizard]);
+
+  // Story 9: pre-select the suggested region once the lists are on screen.
+  // Only fills an empty selection — a user's pick (or a previous file's
+  // suggestion they kept) is never overwritten.
+  useEffect(() => {
+    if (
+      wizard.currentStep === 2 &&
+      regionSuggestion &&
+      regionSuggestion.sourceFile === fileChoice?.file &&
+      regionSuggestion.suggestion &&
+      tagChoice.regionId === null
+    ) {
+      setTagChoice({ ...tagChoice, regionId: regionSuggestion.suggestion.region_id });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wizard.currentStep, regionSuggestion, fileChoice]);
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
@@ -233,7 +273,15 @@ function FarmerWizardContent() {
           <YieldColumnStep yieldChoice={yieldChoice} setYieldChoice={setYieldChoice} />
         )}
         {wizard.currentStep === 2 && (
-          <RegionCropStep tagChoice={tagChoice} setTagChoice={setTagChoice} />
+          <RegionCropStep
+            tagChoice={tagChoice}
+            setTagChoice={setTagChoice}
+            regionSuggestion={
+              regionSuggestion && regionSuggestion.sourceFile === fileChoice?.file
+                ? regionSuggestion.suggestion
+                : null
+            }
+          />
         )}
         {wizard.currentStep === 3 && (
           <ReviewStep
@@ -493,9 +541,11 @@ function YieldColumnStep({
 function RegionCropStep({
   tagChoice,
   setTagChoice,
+  regionSuggestion,
 }: {
   tagChoice: TagChoice;
   setTagChoice: (c: TagChoice) => void;
+  regionSuggestion: RegionSuggestion | null;
 }) {
   const [regions, setRegions] = useState<AgriRegion[]>([]);
   const [crops, setCrops] = useState<AgriCrop[]>([]);
@@ -558,6 +608,12 @@ function RegionCropStep({
               </option>
             ))}
           </select>
+          {regionSuggestion && tagChoice.regionId === regionSuggestion.region_id && (
+            <p className="mt-1 flex items-center gap-1 text-xs text-blue-600">
+              <Check className="h-3 w-3" />
+              Pre-selected from your file — change it if that's not your region.
+            </p>
+          )}
         </div>
         <div>
           <label className="mb-1 block text-sm font-medium text-gray-700">Crop</label>
@@ -671,6 +727,64 @@ function ReviewStep({
 
 // ── Step 5: Results ───────────────────────────────────────────────────
 
+function ClassifierCard({ status }: { status: CropClassifierStatus }) {
+  const badge = (() => {
+    switch (status.state) {
+      case 'training':
+        return { label: 'Training', bg: 'bg-yellow-100', text: 'text-yellow-800' };
+      case 'complete':
+        return { label: 'Ready', bg: 'bg-green-100', text: 'text-green-800' };
+      case 'error':
+        return { label: 'Error', bg: 'bg-red-100', text: 'text-red-800' };
+      default:
+        return null;
+    }
+  })();
+  if (!badge) return null;
+
+  let accuracyLabel: string | null = null;
+  if (status.accuracy) {
+    try {
+      const parsed = JSON.parse(status.accuracy);
+      const first = Object.values(parsed)[0];
+      accuracyLabel =
+        typeof first === 'number'
+          ? `${(first * 100).toFixed(1)}%`
+          : String(first);
+    } catch {
+      accuracyLabel = status.accuracy;
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+      <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
+        Crop Classifier
+      </p>
+      <div className="mt-2 flex items-center gap-3">
+        <span
+          className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${badge.bg} ${badge.text}`}
+        >
+          {badge.label}
+        </span>
+        {accuracyLabel && (
+          <span className="text-sm text-gray-600">Accuracy: {accuracyLabel}</span>
+        )}
+      </div>
+      {status.error_message && (
+        <p className="mt-1 text-xs text-red-600">{status.error_message}</p>
+      )}
+      <p className="mt-2 text-xs text-gray-500">
+        {status.state === 'training'
+          ? 'A model is learning crop suitability from pooled farm data. Predictions will be available when training completes.'
+          : status.state === 'complete'
+          ? 'The crop-suitability model is ready. It learns which crops suit a region from pooled farm data.'
+          : 'Training did not succeed. An admin can retry once more data is available.'}
+      </p>
+    </div>
+  );
+}
+
 function ResultsStep({
   result,
   onViewDataset,
@@ -736,6 +850,11 @@ function ResultsStep({
           View dataset
         </button>
       </div>
+
+      {result.classifier && result.classifier.state !== 'none' && (
+        <ClassifierCard status={result.classifier} />
+      )}
+
     </div>
   );
 }

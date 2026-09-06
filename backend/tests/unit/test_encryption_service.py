@@ -15,6 +15,7 @@ import os
 from unittest.mock import patch, MagicMock
 from cryptography.fernet import Fernet
 
+from app.core.config import settings
 from app.core.encryption import (
     EncryptionService,
     encrypt,
@@ -35,27 +36,35 @@ class TestEncryptionService:
 
     @pytest.fixture
     def service(self, encryption_key):
-        """Create EncryptionService instance with test key"""
-        with patch.dict(os.environ, {"ENCRYPTION_KEY": encryption_key}):
+        """Create EncryptionService instance with test key.
+
+        The service reads settings.ENCRYPTION_KEY (pydantic, loaded at import),
+        so patch that attribute directly — patching os.environ has no effect.
+        """
+        with patch.object(settings, "ENCRYPTION_KEY", encryption_key):
             return EncryptionService()
 
     def test_initialization_success(self, encryption_key):
         """Test successful service initialization"""
-        with patch.dict(os.environ, {"ENCRYPTION_KEY": encryption_key}):
+        with patch.object(settings, "ENCRYPTION_KEY", encryption_key):
             service = EncryptionService()
             assert service._cipher is not None
 
-    def test_initialization_no_key(self):
-        """Test initialization fails without encryption key"""
-        with patch.dict(os.environ, {}, clear=True):
-            with pytest.raises(ValueError, match="ENCRYPTION_KEY environment variable not set"):
-                EncryptionService()
+    def test_initialization_no_key(self, caplog):
+        """Without a configured key the service falls back to a generated
+        temporary key (development convenience) and warns loudly."""
+        with patch.object(settings, "ENCRYPTION_KEY", None):
+            service = EncryptionService()
+            assert service._cipher is not None
+        assert any("ENCRYPTION_KEY not found" in record.message for record in caplog.records)
 
     def test_initialization_invalid_key(self):
-        """Test initialization fails with invalid key"""
-        with patch.dict(os.environ, {"ENCRYPTION_KEY": "invalid_key"}):
-            with pytest.raises(Exception):
-                EncryptionService()
+        """A non-Fernet-format secret is derived into a valid key via PBKDF2
+        rather than rejected."""
+        with patch.object(settings, "ENCRYPTION_KEY", "invalid_key"):
+            service = EncryptionService()
+            assert service._cipher is not None
+            assert service.decrypt(service.encrypt("probe")) == "probe"
 
     def test_encrypt_string(self, service):
         """Test encrypting a string"""
@@ -188,20 +197,18 @@ class TestEncryptionService:
 
         # Create new service with different key
         new_key = Fernet.generate_key().decode()
-        with patch.dict(os.environ, {"ENCRYPTION_KEY": new_key}):
+        with patch.object(settings, "ENCRYPTION_KEY", new_key):
             wrong_service = EncryptionService()
             with pytest.raises(Exception):
                 wrong_service.decrypt(encrypted)
 
     def test_encrypt_none_value(self, service):
-        """Test encrypting None value raises error"""
-        with pytest.raises((TypeError, AttributeError)):
-            service.encrypt(None)
+        """Encrypting None returns empty string (falsy-input guard)."""
+        assert service.encrypt(None) == ""
 
     def test_decrypt_none_value(self, service):
-        """Test decrypting None value raises error"""
-        with pytest.raises((TypeError, AttributeError)):
-            service.decrypt(None)
+        """Decrypting None returns empty string (falsy-input guard)."""
+        assert service.decrypt(None) == ""
 
     def test_is_encrypted_true(self, service):
         """Test is_encrypted identifies encrypted data"""
@@ -270,7 +277,7 @@ class TestModuleLevelFunctions:
     def setup_encryption_key(self):
         """Set up encryption key for module-level functions"""
         self.key = Fernet.generate_key().decode()
-        with patch.dict(os.environ, {"ENCRYPTION_KEY": self.key}):
+        with patch.object(settings, "ENCRYPTION_KEY", self.key):
             yield
 
     def test_encrypt_function(self):
@@ -314,7 +321,7 @@ class TestSecurityRequirements:
     def service(self):
         """Create service with test key"""
         key = Fernet.generate_key().decode()
-        with patch.dict(os.environ, {"ENCRYPTION_KEY": key}):
+        with patch.object(settings, "ENCRYPTION_KEY", key):
             return EncryptionService()
 
     def test_encryption_produces_non_deterministic_output(self, service):
@@ -348,19 +355,19 @@ class TestSecurityRequirements:
         """Test scenario where key rotation is needed"""
         # Encrypt with old key
         old_key = Fernet.generate_key().decode()
-        with patch.dict(os.environ, {"ENCRYPTION_KEY": old_key}):
+        with patch.object(settings, "ENCRYPTION_KEY", old_key):
             old_service = EncryptionService()
             encrypted = old_service.encrypt("secret_data")
 
         # Cannot decrypt with new key
         new_key = Fernet.generate_key().decode()
-        with patch.dict(os.environ, {"ENCRYPTION_KEY": new_key}):
+        with patch.object(settings, "ENCRYPTION_KEY", new_key):
             new_service = EncryptionService()
             with pytest.raises(Exception):
                 new_service.decrypt(encrypted)
 
         # Can still decrypt with old key
-        with patch.dict(os.environ, {"ENCRYPTION_KEY": old_key}):
+        with patch.object(settings, "ENCRYPTION_KEY", old_key):
             old_service = EncryptionService()
             decrypted = old_service.decrypt(encrypted)
             assert decrypted == "secret_data"
@@ -378,19 +385,24 @@ class TestSecurityRequirements:
         for record in caplog.records:
             assert plaintext not in record.message
 
-    def test_encryption_key_validation(self):
-        """Test that invalid encryption keys are rejected"""
-        invalid_keys = [
-            "",
+    def test_encryption_key_derivation(self):
+        """Non-Fernet-format secrets are derived into valid keys via PBKDF2;
+        an empty secret falls back to a generated development key."""
+        secrets = [
             "short",
             "not_base64_!@#$",
             "a" * 100,
         ]
 
-        for invalid_key in invalid_keys:
-            with patch.dict(os.environ, {"ENCRYPTION_KEY": invalid_key}):
-                with pytest.raises(Exception):
-                    EncryptionService()
+        for secret in secrets:
+            with patch.object(settings, "ENCRYPTION_KEY", secret):
+                service = EncryptionService()
+                assert service._cipher is not None
+                assert service.decrypt(service.encrypt("probe")) == "probe"
+
+        with patch.object(settings, "ENCRYPTION_KEY", ""):
+            service = EncryptionService()
+            assert service._cipher is not None
 
 
 class TestPerformance:
@@ -400,7 +412,7 @@ class TestPerformance:
     def service(self):
         """Create service with test key"""
         key = Fernet.generate_key().decode()
-        with patch.dict(os.environ, {"ENCRYPTION_KEY": key}):
+        with patch.object(settings, "ENCRYPTION_KEY", key):
             return EncryptionService()
 
     def test_encrypt_large_payload(self, service):

@@ -4,14 +4,23 @@ from unittest.mock import Mock
 import pandas as pd
 import pytest
 
-from app.api.data_sharing import (
-    _attach_shared_chat_visualizations,
-    _build_anton_shared_context,
-    _is_visualization_prompt,
-    _with_anton_context,
-)
 from app.models.dataset import Dataset, DatasetChatSession, DatasetType
+from app.services.data_sharing import DataSharingService
 from app.services.mindsdb import MindsDBService
+from app.services.prompt_templates import build_anton_shared_context, with_anton_context
+
+
+def _attach_shared_chat_visualizations(chat_response, dataset, db, message, mindsdb_service):
+    """Call the visualization helper through its current home: the
+    DataSharingService method (moved out of app.api.data_sharing during the
+    dataset-service refactor). The service reads db from itself."""
+    service = DataSharingService(db)
+    return service._attach_shared_chat_visualizations(
+        chat_response=chat_response,
+        dataset=dataset,
+        message=message,
+        mindsdb_service=mindsdb_service,
+    )
 
 
 def make_dataset(**overrides):
@@ -62,13 +71,13 @@ def make_session():
 
 
 def test_visualization_prompt_detects_agentic_bi_requests():
-    assert _is_visualization_prompt("Create a dashboard of revenue trends")
-    assert _is_visualization_prompt("Show me a chart")
-    assert not _is_visualization_prompt("What columns are available?")
+    assert DataSharingService._is_visualization_prompt("Create a dashboard of revenue trends")
+    assert DataSharingService._is_visualization_prompt("Show me a chart")
+    assert not DataSharingService._is_visualization_prompt("What columns are available?")
 
 
 def test_anton_context_includes_memory_taxonomy_and_rules():
-    context = _build_anton_shared_context(
+    context = build_anton_shared_context(
         make_dataset(),
         make_session(),
         "Create a dashboard of revenue trends",
@@ -96,7 +105,7 @@ async def test_attach_visualizations_adds_real_chart_payloads(monkeypatch):
     async def load_dataset(_dataset, _db):
         return df
 
-    monkeypatch.setattr(mindsdb_service, "_load_dataset_for_visualization", load_dataset)
+    monkeypatch.setattr(mindsdb_service, "load_dataset_for_visualization", load_dataset)
 
     response = await _attach_shared_chat_visualizations(
         chat_response={"answer": "Here is the trend."},
@@ -116,7 +125,7 @@ async def test_attach_visualizations_adds_real_chart_payloads(monkeypatch):
 async def test_attach_visualizations_keeps_normal_chat_without_charts(monkeypatch):
     mindsdb_service = MindsDBService()
     load_mock = Mock()
-    monkeypatch.setattr(mindsdb_service, "_load_dataset_for_visualization", load_mock)
+    monkeypatch.setattr(mindsdb_service, "load_dataset_for_visualization", load_mock)
 
     response = await _attach_shared_chat_visualizations(
         chat_response={"answer": "The dataset has revenue columns."},
@@ -138,7 +147,7 @@ async def test_attach_visualizations_does_not_break_answer_for_unsupported_data(
     async def load_dataset(_dataset, _db):
         return None
 
-    monkeypatch.setattr(mindsdb_service, "_load_dataset_for_visualization", load_dataset)
+    monkeypatch.setattr(mindsdb_service, "load_dataset_for_visualization", load_dataset)
 
     response = await _attach_shared_chat_visualizations(
         chat_response={"answer": "I can summarize the document."},
@@ -167,7 +176,7 @@ def test_mindsdb_loader_uses_safe_connector_query(monkeypatch):
     monkeypatch.setattr(mindsdb_service, "connection", connection)
     monkeypatch.setattr(mindsdb_service, "_connected", True)
 
-    df = mindsdb_service._load_mindsdb_table_for_visualization(dataset)
+    df = mindsdb_service.load_mindsdb_table_for_visualization(dataset)
 
     assert df.equals(result_df)
     connection.query.assert_called_once_with("SELECT * FROM finance_db.monthly_revenue LIMIT 10000")
@@ -185,7 +194,7 @@ def test_mindsdb_loader_rejects_unsafe_connector_identifiers(monkeypatch):
     monkeypatch.setattr(mindsdb_service, "connection", connection)
     monkeypatch.setattr(mindsdb_service, "_connected", True)
 
-    assert mindsdb_service._load_mindsdb_table_for_visualization(dataset) is None
+    assert mindsdb_service.load_mindsdb_table_for_visualization(dataset) is None
     query_mock.assert_not_called()
 
 
@@ -205,7 +214,7 @@ async def test_shared_visualization_allows_recipient_from_different_organization
         assert _dataset.share_token == "org-a-token"
         return df
 
-    monkeypatch.setattr(mindsdb_service, "_load_dataset_for_visualization", load_dataset)
+    monkeypatch.setattr(mindsdb_service, "load_dataset_for_visualization", load_dataset)
 
     response = await _attach_shared_chat_visualizations(
         chat_response={"answer": "Revenue is trending upward."},
@@ -214,7 +223,7 @@ async def test_shared_visualization_allows_recipient_from_different_organization
         message="Visualize revenue trend for this shared data",
         mindsdb_service=mindsdb_service,
     )
-    prompt = _with_anton_context("Visualize revenue trend", dataset, session)
+    prompt = with_anton_context("Visualize revenue trend", dataset, session)
 
     assert response["has_visualizations"] is True
     assert response["data_analysis"]["dataset_name"] == "Revenue Metrics"
@@ -233,7 +242,7 @@ async def test_shared_visualization_stays_scoped_to_requested_dataset(monkeypatc
         loaded_dataset_ids.append(dataset.id)
         return pd.DataFrame({"revenue": [10, 20, 30], "segment": ["A", "B", "C"]})
 
-    monkeypatch.setattr(mindsdb_service, "_load_dataset_for_visualization", load_dataset)
+    monkeypatch.setattr(mindsdb_service, "load_dataset_for_visualization", load_dataset)
 
     response = await _attach_shared_chat_visualizations(
         chat_response={"answer": "Here is the requested dataset chart."},
@@ -242,8 +251,8 @@ async def test_shared_visualization_stays_scoped_to_requested_dataset(monkeypatc
         message="Show a bar chart",
         mindsdb_service=mindsdb_service,
     )
-    requested_prompt = _with_anton_context("Show a bar chart", requested_dataset, make_session())
-    other_prompt = _with_anton_context("Show a bar chart", other_dataset, make_session())
+    requested_prompt = with_anton_context("Show a bar chart", requested_dataset, make_session())
+    other_prompt = with_anton_context("Show a bar chart", other_dataset, make_session())
 
     assert loaded_dataset_ids == [1]
     assert response["has_visualizations"] is True

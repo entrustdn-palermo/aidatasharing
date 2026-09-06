@@ -839,7 +839,7 @@ class TestProcessPdfDocument:
         pdf_path.write_text("%PDF-1.4 fake")
 
         mock_fitz = Mock()
-        mock_doc = Mock()
+        mock_doc = MagicMock()  # MagicMock so len(doc) works
         mock_page = Mock()
         mock_page.get_text.return_value = "Extracted text content"
         mock_doc.load_page.return_value = mock_page
@@ -1173,7 +1173,12 @@ class TestTypeSpecificConnections:
         mock_conn.cursor.return_value = mock_cursor
         mock_connector.connect.return_value = mock_conn
 
-        with patch.dict("sys.modules", {"mysql": Mock(), "mysql.connector": mock_connector}):
+        # `import mysql.connector` then `mysql.connector.connect(...)` resolves
+        # through the parent module attribute, so wire it explicitly.
+        mock_mysql = Mock()
+        mock_mysql.connector = mock_connector
+
+        with patch.dict("sys.modules", {"mysql": mock_mysql, "mysql.connector": mock_connector}):
             result = await svc._test_mysql_connection(connector)
 
             assert result["success"] is True
@@ -1187,7 +1192,10 @@ class TestTypeSpecificConnections:
         mock_connector = Mock()
         mock_connector.connect.side_effect = Exception("Connection refused")
 
-        with patch.dict("sys.modules", {"mysql": Mock(), "mysql.connector": mock_connector}):
+        mock_mysql = Mock()
+        mock_mysql.connector = mock_connector
+
+        with patch.dict("sys.modules", {"mysql": mock_mysql, "mysql.connector": mock_connector}):
             result = await svc._test_mysql_connection(connector)
 
             assert result["success"] is False
@@ -1235,7 +1243,12 @@ class TestTypeSpecificConnections:
 
             assert result["success"] is True
             assert result["bucket_count"] == 2
-            mock_boto3.client.assert_called_once_with("s3")
+            # The service merges connection_config + credentials into the client kwargs
+            mock_boto3.client.assert_called_once_with(
+                "s3",
+                host="localhost", port=3306, database="testdb",
+                user="testuser", password="testpass",
+            )
 
     async def test_s3_failure(self, svc, connector):
         """Failed S3 connection returns error."""

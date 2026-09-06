@@ -525,12 +525,53 @@ class DatasetService:
         dataset_dict["is_multi_file"] = len(dataset_files) > 1
         dataset_dict["total_files_count"] = len(dataset_files)
 
+        # Resolve agricultural tags to human-readable names. region_id/crop_id
+        # already ride along in dataset_dict (raw columns); we add the names so
+        # the detail page can render "Central Java / Rice" rather than bare ids.
+        # Deactivated reference entries still resolve — historical tags never break.
+        agri_tags = self._resolve_agri_tags(dataset)
+        if agri_tags:
+            dataset_dict["agri_tags"] = agri_tags
+
         for key in ['created_at', 'updated_at', 'last_accessed', 'deleted_at',
                      'last_downloaded_at', 'ai_processed_at', 'share_expires_at',
                      'agent_created_at', 'agent_last_updated']:
             if key in dataset_dict and dataset_dict[key]:
                 dataset_dict[key] = dataset_dict[key].isoformat()
         return dataset_dict
+
+    def _resolve_agri_tags(self, dataset: Dataset) -> Optional[Dict[str, Any]]:
+        """Build the agri_tags block for a dataset, or None if it carries no tags.
+
+        Region/Crop names are resolved through AgriDataService (which ignores
+        active state, so a deactivated reference entry still labels a dataset
+        tagged before deactivation). season and yield_column are stored verbatim.
+        """
+        if not (dataset.region_id or dataset.crop_id or dataset.season or dataset.yield_column):
+            return None
+
+        agri = AgriDataService(self.db)
+        tags: Dict[str, Any] = {
+            "region_id": dataset.region_id,
+            "region_name": None,
+            "crop_id": dataset.crop_id,
+            "crop_name": None,
+            "season": dataset.season,
+            "yield_column": dataset.yield_column,
+        }
+        # get_region/get_crop resolve regardless of active state and raise only
+        # when the row is gone entirely (hard delete) — degrade to id-only then.
+        if dataset.region_id:
+            try:
+                tags["region_name"] = agri.get_region(dataset.region_id).name
+            except ValueError:
+                pass
+        if dataset.crop_id:
+            try:
+                tags["crop_name"] = agri.get_crop(dataset.crop_id).name
+            except ValueError:
+                pass
+        return tags
 
     async def get_dataset_schema(self, dataset_id: int, user: User) -> Dict[str, Any]:
         """Return schema info for a dataset."""
@@ -1045,15 +1086,16 @@ class DatasetService:
             models_query = f"SHOW MODELS WHERE name LIKE 'dataset_{dataset_id}_%';"
             result = mindsdb_service.execute_query(models_query)
 
-            if result.get('data'):
-                for model_data in result['data']:
-                    model_info = {
-                        "name": model_data[0] if len(model_data) > 0 else "unknown",
-                        "engine": model_data[1] if len(model_data) > 1 else "unknown",
-                        "status": model_data[5] if len(model_data) > 5 else "unknown",
-                        "predict": model_data[7] if len(model_data) > 7 else "unknown",
-                    }
-                    models_info.append(model_info)
+            for row in (result.get('rows') or []):
+                if not isinstance(row, dict):
+                    continue
+                model_info = {
+                    "name": row.get("name") or row.get("NAME") or "unknown",
+                    "engine": row.get("engine") or row.get("ENGINE") or "unknown",
+                    "status": row.get("status") or row.get("STATUS") or "unknown",
+                    "predict": row.get("predict") or row.get("PREDICT") or "unknown",
+                }
+                models_info.append(model_info)
         except Exception as e:
             logger.warning(f"Could not fetch model status for dataset {dataset_id}: {e}")
 

@@ -66,8 +66,8 @@ def mock_csv_file():
     return f
 
 
-def _active_region(id=5, name="Jawa Barat"):
-    return Region(id=id, name=name, code="JB", is_active=True)
+def _active_region(id=5, name="Jawa Barat", code="JB"):
+    return Region(id=id, name=name, code=code, is_active=True)
 
 
 def _active_crop(id=2, name="Padi"):
@@ -202,6 +202,71 @@ class TestSuggestYieldColumn:
         assert result in cols or result is None
 
 
+# ── Region pre-suggestion (Story 9) ───────────────────────────────────
+
+class TestSuggestRegionForFile:
+    def _csv(self, header, rows):
+        """rows: one list of cells per data line."""
+        lines = [",".join(header)] + [",".join(r) for r in rows]
+        return ("\n".join(lines) + "\n").encode()
+
+    def test_suggests_region_from_matching_column(self, agri_svc, db_session):
+        db_session.all.return_value = [_active_region(id=5, name="Jawa Barat")]
+        content = self._csv(
+            ["plot", "wilayah", "produksi"],
+            [["1", "Jawa Barat", "5.2"], ["2", "Jawa Barat", "4.8"]],
+        )
+        result = agri_svc.suggest_region_for_file(content, "farm.csv")
+        assert result["region_column"] == "wilayah"
+        assert result["suggestion"] == {"region_id": 5, "region_name": "Jawa Barat"}
+
+    def test_matches_case_insensitively_and_by_code(self, agri_svc, db_session):
+        db_session.all.return_value = [_active_region(id=5, name="Jawa Barat", code="JB")]
+        content = self._csv(["Region"], [["jawa barat"], ["JB"]])
+        result = agri_svc.suggest_region_for_file(content, "farm.csv")
+        assert result["suggestion"]["region_id"] == 5
+
+    def test_no_region_like_column_returns_none(self, agri_svc, db_session):
+        content = self._csv(["plot", "produksi"], [["1", "5.2"]])
+        result = agri_svc.suggest_region_for_file(content, "farm.csv")
+        assert result == {"suggestion": None, "region_column": None}
+
+    def test_unrecognizable_values_return_none(self, agri_svc, db_session):
+        db_session.all.return_value = [_active_region(id=5, name="Jawa Barat")]
+        content = self._csv(["wilayah"], [["Atlantis"]])
+        result = agri_svc.suggest_region_for_file(content, "farm.csv")
+        assert result["suggestion"] is None
+        assert result["region_column"] == "wilayah"
+
+    def test_mixed_regions_return_none(self, agri_svc, db_session):
+        db_session.all.return_value = [
+            _active_region(id=5, name="Jawa Barat"),
+            _active_region(id=6, name="Jawa Tengah"),
+        ]
+        content = self._csv(["wilayah"], [["Jawa Barat"], ["Jawa Tengah"]])
+        result = agri_svc.suggest_region_for_file(content, "farm.csv")
+        assert result["suggestion"] is None
+        assert result["region_column"] == "wilayah"
+
+    def test_blank_cells_are_skipped(self, agri_svc, db_session):
+        db_session.all.return_value = [_active_region(id=5, name="Jawa Barat")]
+        content = self._csv(["wilayah"], [["Jawa Barat"], [""], ["jawa barat"]])
+        result = agri_svc.suggest_region_for_file(content, "farm.csv")
+        assert result["suggestion"]["region_id"] == 5
+
+    def test_non_tabular_file_returns_none(self, agri_svc):
+        result = agri_svc.suggest_region_for_file(b"not a csv", "notes.txt")
+        assert result == {"suggestion": None, "region_column": None}
+
+    def test_suggestion_never_applied_without_user(self, agri_svc, db_session):
+        # The method only reports a guess; it must not touch the db.
+        db_session.all.return_value = [_active_region(id=5, name="Jawa Barat")]
+        content = self._csv(["wilayah"], [["Jawa Barat"]])
+        agri_svc.suggest_region_for_file(content, "farm.csv")
+        db_session.add.assert_not_called()
+        db_session.commit.assert_not_called()
+
+
 # ── Contributing Dataset qualification ────────────────────────────────
 
 class TestQualification:
@@ -295,8 +360,7 @@ class TestCreateFromFilesWithTags:
             assert result.status == DatasetStatus.ACTIVE
 
     async def test_tags_survive_through_detail(self, dataset_svc, db_session, owner):
-        """Agri tags appear in the dataset detail response."""
-        from app.services.dataset_service import DataSharingService
+        """Agri tags appear in the dataset detail response, with names resolved."""
         ds = Dataset(
             id=42, name="Agri", type=DatasetType.CSV, status=DatasetStatus.ACTIVE,
             owner_id=owner.id, organization_id=owner.organization_id,
@@ -306,11 +370,60 @@ class TestCreateFromFilesWithTags:
         with (
             patch("app.services.dataset_service.DataSharingService") as MockDS,
             patch("app.services.dataset_service.AccessControlService"),
+            patch("app.services.dataset_service.AgriDataService") as MockAgri,
         ):
             MockDS.return_value.can_access_dataset.return_value = True
+            MockAgri.return_value.get_region.return_value = _active_region(id=5, name="Jawa Barat")
+            MockAgri.return_value.get_crop.return_value = _active_crop(id=2, name="Padi")
             result = await dataset_svc.get_dataset_details(dataset_id=42, user=owner)
 
         assert result["region_id"] == 5
         assert result["crop_id"] == 2
         assert result["season"] == "2026A"
         assert result["yield_column"] == "produksi"
+        # Story 30: names resolved for display (deactivated entries included)
+        assert result["agri_tags"] == {
+            "region_id": 5, "region_name": "Jawa Barat",
+            "crop_id": 2, "crop_name": "Padi",
+            "season": "2026A", "yield_column": "produksi",
+        }
+
+    async def test_untagged_dataset_has_no_agri_block(self, dataset_svc, db_session, owner):
+        """A dataset without agri tags carries no agri_tags key."""
+        ds = Dataset(
+            id=43, name="Plain", type=DatasetType.CSV, status=DatasetStatus.ACTIVE,
+            owner_id=owner.id, organization_id=owner.organization_id,
+        )
+        db_session.first.return_value = ds
+        with (
+            patch("app.services.dataset_service.DataSharingService") as MockDS,
+            patch("app.services.dataset_service.AccessControlService"),
+            patch("app.services.dataset_service.AgriDataService") as MockAgri,
+        ):
+            MockDS.return_value.can_access_dataset.return_value = True
+            result = await dataset_svc.get_dataset_details(dataset_id=43, user=owner)
+
+        assert "agri_tags" not in result
+        MockAgri.assert_not_called()
+
+    async def test_detail_resolves_deactivated_reference_entries(self, dataset_svc, db_session, owner):
+        """A tag pointing at a deactivated Region/Crop still renders its name."""
+        ds = Dataset(
+            id=44, name="Legacy", type=DatasetType.CSV, status=DatasetStatus.ACTIVE,
+            owner_id=owner.id, organization_id=owner.organization_id,
+            region_id=7, crop_id=None, season=None, yield_column=None,
+        )
+        db_session.first.return_value = ds
+        with (
+            patch("app.services.dataset_service.DataSharingService") as MockDS,
+            patch("app.services.dataset_service.AccessControlService"),
+            patch("app.services.dataset_service.AgriDataService") as MockAgri,
+        ):
+            MockDS.return_value.can_access_dataset.return_value = True
+            MockAgri.return_value.get_region.return_value = Region(
+                id=7, name="Daerah Lama", is_active=False
+            )
+            result = await dataset_svc.get_dataset_details(dataset_id=44, user=owner)
+
+        assert result["agri_tags"]["region_name"] == "Daerah Lama"
+        assert result["agri_tags"]["crop_name"] is None

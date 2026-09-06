@@ -251,7 +251,9 @@ class DatasetModel(Base):
     __tablename__ = "dataset_models"
 
     id = Column(Integer, primary_key=True, index=True)
-    dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=False)
+    # Nullable since the pooled crop classifier: a model trained over the
+    # whole cross-org pool belongs to no single Dataset (ADR-0001).
+    dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=True)
     name = Column(String, nullable=False)
     model_type = Column(String, nullable=False)  # 'predictor', 'classifier', 'chat', 'embedding'
     mindsdb_model_name = Column(String, nullable=False)
