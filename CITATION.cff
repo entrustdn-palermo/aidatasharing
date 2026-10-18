@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: CC-BY-4.0
+# This citation refers to the secondment technical report, not the software.
+cff-version: 1.2.0
+title: "Technical Report During Secondment: Agent-Based Architecture Implementation for Agricultural Sustainability Analysis"
+type: report
+authors:
+  - family-names: Akbar
+    given-names: Nur Arifin
+    orcid: "https://orcid.org/0000-0002-3305-2187"
+institution:
+  - name: "Università degli Studi di Palermo (UNIPA)"
+date-released: 2025-11-06
+version: "1.0"
+url: "https://entrustdn-palermo.github.io/aidatasharing/"
+repository-code: "https://github.com/entrustdn-palermo/aidatasharing"
+keywords:
+  - agricultural sustainability
+  - agent-based architecture
+  - MindsDB
+  - data sharing
+  - ENTRUST Doctoral Network
+license: CC-BY-4.0
+abstract: >
+  Secondment technical report (October 26 – November 6, 2025, Airfield Estate,
+  Dublin, Ireland) documenting the migration of the Entrust Data Sharing MCP
+  Platform from a static prompt-based architecture to a MindsDB agent-based
+  system. Reports 60–75% faster queries, 20%→100% data utilisation, and
+  multi-file correlation validated against real agricultural data.
+  EU Horizon ENTRUST Doctoral Network, Grant Agreement No 101073381.
+preferred-citation:
+  type: report
+  title: "Technical Report During Secondment: Agent-Based Architecture Implementation for Agricultural Sustainability Analysis"
+  authors:
+    - family-names: Akbar
+      given-names: Nur Arifin
+  institution:
+    - name: "Università degli Studi di Palermo (UNIPA)"
+  year: 2025
+  month: 11
+  number: "ENTRUST-SR-2025-001"
+  url: "https://entrustdn-palermo.github.io/aidatasharing/"
